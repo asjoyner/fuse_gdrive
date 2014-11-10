@@ -23,5 +23,8 @@ _testmain.go
 *.test
 *.prof
 
+# vim swap files
+*.swp
+
 # Go binary
 fuse-gdrive
