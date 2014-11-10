@@ -27,4 +27,4 @@ _testmain.go
 *.swp
 
 # Go binary
-fuse-gdrive
+fuse_gdrive
