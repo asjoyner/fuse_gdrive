@@ -40,8 +40,8 @@ func main() {
     log.Fatal("failed to list files in drive: ", err)
   }
 
-  for f := range files {
-    fmt.Println(f)
+  for _, f := range files {
+    fmt.Printf("%+v\n", f.Title)
   }
 
 	c, err := fuse.Mount(
