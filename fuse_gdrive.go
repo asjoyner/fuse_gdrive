@@ -10,6 +10,8 @@ import (
 	"log"
 	"os"
 
+  drive "code.google.com/p/google-api-go-client/drive/v2"
+
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	_ "bazil.org/fuse/fs/fstestutil"
@@ -31,12 +33,23 @@ func main() {
 	}
 	mountpoint := flag.Arg(0)
 
+  client := getOAuthClient(drive.DriveReadonlyScope)
+  service, _ := drive.New(client)
+  files, err := AllFiles(service)
+  if err != nil {
+    log.Fatal("failed to list files in drive: ", err)
+  }
+
+  for f := range files {
+    fmt.Println(f)
+  }
+
 	c, err := fuse.Mount(
 		mountpoint,
-		fuse.FSName("helloworld"),
-		fuse.Subtype("hellofs"),
+		fuse.FSName("GoogleDrive"),
+		fuse.Subtype("gdrive"),
 		fuse.LocalVolume(),
-		fuse.VolumeName("Hello world!"),
+		fuse.VolumeName("TODO: insert account name here."),
 	)
 	if err != nil {
 		log.Fatal(err)
