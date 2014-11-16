@@ -19,6 +19,7 @@ import (
 )
 
 var nextInode uint64 = 0
+var driveFolderMimeType string = "application/vnd.google-apps.folder"
 
 var Usage = func() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -38,13 +39,13 @@ func (s FS) Root() (fs.Node, fuse.Error) {
 // Node represents a file (or folder) in Drive.
 type Node struct {
   drive.File
-  Children []*Node
-  Inode uint64  // TODO: how do we define an inode?  global incrementer?
+  Children []*Node  // TODO(asjoyner): make this a map by name
+  Inode uint64
 }
 
 // https://developers.google.com/drive/web/folder
 func (n Node) IsDir() bool {
-  if n.MimeType == "application/vnd.google-apps.folder" {
+  if n.MimeType == driveFolderMimeType {
     return true
   }
   return false
@@ -54,7 +55,7 @@ func (n Node) Attr() fuse.Attr {
   if n.IsDir() {
     return fuse.Attr{Inode: n.Inode, Mode: os.ModeDir | 0555}
   } else {
-    return fuse.Attr{Inode: n.Inode, Mode: 0444}
+    return fuse.Attr{Inode: n.Inode, Size: uint64(n.FileSize), Mode: 0444}
   }
 }
 
@@ -67,13 +68,13 @@ func (n Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
     } else {
       childType = fuse.DT_File
     }
-    entry := fuse.Dirent{Inode: n.Inode, Name: n.Title, Type: childType}
+    entry := fuse.Dirent{Inode: child.Inode, Name: child.Title, Type: childType}
     dirs = append(dirs, entry)
   }
 	return dirs, nil
 }
 
-func (n Node) Lookup(name string, intr fs.Intr) (Node, fuse.Error) {
+func (n Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
   for _, child := range n.Children {
     if child.Title == name {
       return *child, nil
@@ -82,8 +83,9 @@ func (n Node) Lookup(name string, intr fs.Intr) (Node, fuse.Error) {
   return Node{}, fuse.ENOENT
 }
 
-func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr) fuse.Error {
   /* TODO: fix this
+func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr) fuse.Error {
+  log.Printf("Whoops, something's calling Read()...\n")
   if n.DownloadUrl == "" { // If there is no downloadUrl, there is no body
     return nil
   }
@@ -109,9 +111,9 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
   }
   return string(body), nil
   copy(resp.Data, resp)  //[]byte
-  */
 	return nil
 }
+  */
 
 func main() {
 	flag.Usage = Usage
@@ -139,14 +141,23 @@ func main() {
 
   // TODO: build a tree representation of nodes in a filesystem, for fuse
   fileById := make(map[string]Node, len(files))
+  rootInode := atomic.AddUint64(&nextInode, 1)
+  rootFile := drive.File{Title: "/", MimeType: driveFolderMimeType}
+  rootNode := Node{rootFile, nil, rootInode}
+  fileById[rootId] = rootNode // synthesize the root of the drive tree
+
   for _, f := range files {
     inode := atomic.AddUint64(&nextInode, 1)
     fileById[f.Id] = Node{*f, nil, inode}
   }
   for _, f := range fileById {
     for _, p := range f.Parents {
-      var parent = fileById[p.Id]  // can't assign to field of a map, so...
-      parent.Children = append(parent.Children, &f)
+      var parent, ok = fileById[p.Id]
+      if !ok {
+        log.Printf("parent of %s not found, expected %s", f.Title, p.Id)
+      }
+      self := fileById[f.Id]
+      parent.Children = append(parent.Children, &self)
       fileById[p.Id] = parent
     }
   }
@@ -157,7 +168,7 @@ func main() {
 		fuse.FSName("GoogleDrive"),
 		fuse.Subtype("gdrive"),
 		fuse.LocalVolume(),
-		fuse.VolumeName("TODO: insert account name here."),
+		fuse.VolumeName(about.User.EmailAddress),
 	)
 	if err != nil {
 		log.Fatal(err)
