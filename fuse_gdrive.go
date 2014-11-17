@@ -20,6 +20,8 @@ import (
 	_ "bazil.org/fuse/fs/fstestutil"
 )
 
+var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
+
 var nextInode uint64 = 0
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
 
@@ -95,6 +97,7 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
     return err
   }
   // See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
+  // https://developers.google.com/drive/web/manage-downloads#partial_download
   spec := fmt.Sprintf("bytes=%s-%s", req.Offset, req.Size)
   dlReq.Header.Add("Range", spec)
   log.Println("Requesting partial size: ", spec)
@@ -105,7 +108,6 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
   if err != nil {
     return err
   }
-  // TODO(asjoyner): optimize out this double copy later
   log.Println("HTTP status response: ", dlResp.StatusCode)
   body, err := ioutil.ReadAll(dlResp.Body)
   resp.Data = body
@@ -121,6 +123,9 @@ func main() {
 		os.Exit(2)
 	}
 	mountpoint := flag.Arg(0)
+
+  http.HandleFunc("/", RootHandler)
+  go http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
 
   client := getOAuthClient(drive.DriveReadonlyScope)
   service, _ := drive.New(client)
@@ -160,6 +165,9 @@ func main() {
     }
   }
   tree := FS{fileById[rootId]}
+
+  http.Handle("/files", FilesPage{files})
+  http.Handle("/tree", TreePage{fileById[rootId]})
 
 	c, err := fuse.Mount(
 		mountpoint,

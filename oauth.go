@@ -25,7 +25,6 @@ import (
 
 )
 
-var hostport     = flag.String("hostport", "localhost:12345", "Host:Port that your browser will send credentials too.  Must be accessible to your browser, and authorized in the developer console.")
 var clientId     = flag.String("clientid", "", "OAuth Client ID.  If non-empty, overrides --clientid_file")
 var clientIdFile = flag.String("clientid_file", "clientid",
                 "Name of a file containing just the project's OAuth Client ID from https://console.developers.google.com/project/<project-id>/apiui/credential")
@@ -82,11 +81,7 @@ func saveToken(file string, token *oauth.Token) {
 func tokenFromWeb(config *oauth.Config) *oauth.Token {
         ch := make(chan string)
         randState := fmt.Sprintf("st%d", time.Now().UnixNano())
-        h := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-                if req.URL.Path == "/favicon.ico" {
-                        http.Error(rw, "", 404)
-                        return
-                }
+        http.HandleFunc("/auth", func(rw http.ResponseWriter, req *http.Request) {
                 if req.FormValue("state") != randState {
                         log.Printf("State doesn't match: req = %#v", req)
                         http.Error(rw, "", 500)
@@ -101,13 +96,8 @@ func tokenFromWeb(config *oauth.Config) *oauth.Token {
                 log.Printf("no code")
                 http.Error(rw, "", 500)
         })
-        s := http.Server{
-          Addr: *hostport,
-          Handler: h,
-        }
-        go s.ListenAndServe()
 
-        config.RedirectURL = fmt.Sprintf("http://%s/", s.Addr)
+        config.RedirectURL = fmt.Sprintf("http://localhost:%s/auth", *port)
         authUrl := config.AuthCodeURL(randState)
         go openUrl(authUrl)
         log.Printf("Authorize this app at: %s", authUrl)
