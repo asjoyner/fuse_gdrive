@@ -7,6 +7,8 @@ package main
 import (
 	"flag"
 	"fmt"
+  "io/ioutil"
+  "net/http"
 	"log"
 	"os"
   "sync/atomic"
@@ -41,6 +43,7 @@ type Node struct {
   drive.File
   Children []*Node  // TODO(asjoyner): make this a map by name
   Inode uint64
+  client *http.Client
 }
 
 // https://developers.google.com/drive/web/folder
@@ -83,37 +86,31 @@ func (n Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
   return Node{}, fuse.ENOENT
 }
 
-  /* TODO: fix this
 func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr) fuse.Error {
-  log.Printf("Whoops, something's calling Read()...\n")
   if n.DownloadUrl == "" { // If there is no downloadUrl, there is no body
     return nil
   }
-  req, err := http.NewRequest("GET", downloadUrl, nil)
+  dlReq, err := http.NewRequest("GET", n.DownloadUrl, nil)
   if err != nil {
     return err
   }
-  spec = fmt.Sprintf("%s-%s", req.Offset, req.Size)
-  req.Header.Add("byte", spec)
+  // See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
+  spec := fmt.Sprintf("bytes=%s-%s", req.Offset, req.Size)
+  dlReq.Header.Add("Range", spec)
+  log.Println("Requesting partial size: ", spec)
 
-  resp, err := t.RoundTrip(req)
+  dlResp, err := n.client.Do(dlReq)
   // Make sure we close the Body later
-  // maybe in Release()?
-  defer resp.Body.Close()
+  defer dlResp.Body.Close()
   if err != nil {
-    fmt.Printf("An error occurred: %v\n", err)
-    return "", err
+    return err
   }
-  body, err := ioutil.ReadAll(resp.Body)
-  if err != nil {
-    fmt.Printf("An error occurred: %v\n", err)
-    return "", err
-  }
-  return string(body), nil
-  copy(resp.Data, resp)  //[]byte
+  // TODO(asjoyner): optimize out this double copy later
+  log.Println("HTTP status response: ", dlResp.StatusCode)
+  body, err := ioutil.ReadAll(dlResp.Body)
+  resp.Data = body
 	return nil
 }
-  */
 
 func main() {
 	flag.Usage = Usage
@@ -128,6 +125,7 @@ func main() {
   client := getOAuthClient(drive.DriveReadonlyScope)
   service, _ := drive.New(client)
   files, err := AllFiles(service)
+  log.Println("Num files in Drive: ", len(files))
   if err != nil {
     log.Fatal("failed to list files in drive: ", err)
   }
@@ -143,12 +141,12 @@ func main() {
   fileById := make(map[string]Node, len(files))
   rootInode := atomic.AddUint64(&nextInode, 1)
   rootFile := drive.File{Title: "/", MimeType: driveFolderMimeType}
-  rootNode := Node{rootFile, nil, rootInode}
+  rootNode := Node{rootFile, nil, rootInode, client}
   fileById[rootId] = rootNode // synthesize the root of the drive tree
 
   for _, f := range files {
     inode := atomic.AddUint64(&nextInode, 1)
-    fileById[f.Id] = Node{*f, nil, inode}
+    fileById[f.Id] = Node{*f, nil, inode, client}
   }
   for _, f := range fileById {
     for _, p := range f.Parents {
