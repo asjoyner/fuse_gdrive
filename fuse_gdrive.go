@@ -43,7 +43,7 @@ func (s FS) Root() (fs.Node, fuse.Error) {
 // Node represents a file (or folder) in Drive.
 type Node struct {
   drive.File
-  Children []*Node  // TODO(asjoyner): make this a map by name
+  Children map[string]*Node
   Inode uint64
   client *http.Client
 }
@@ -80,10 +80,8 @@ func (n Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 }
 
 func (n Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
-  for _, child := range n.Children {
-    if child.Title == name {
-      return *child, nil
-    }
+  if child, ok := n.Children[name]; ok {
+    return child, nil
   }
   return Node{}, fuse.ENOENT
 }
@@ -142,32 +140,33 @@ func main() {
   rootId := about.RootFolderId
 
 
-  // TODO: build a tree representation of nodes in a filesystem, for fuse
-  fileById := make(map[string]Node, len(files))
+  // build a tree representation of nodes in a filesystem, for fuse
+  fileById := make(map[string]*Node, len(files))
   rootInode := atomic.AddUint64(&nextInode, 1)
   rootFile := drive.File{Title: "/", MimeType: driveFolderMimeType}
   rootNode := Node{rootFile, nil, rootInode, client}
-  fileById[rootId] = rootNode // synthesize the root of the drive tree
+  fileById[rootId] = &rootNode // synthesize the root of the drive tree
 
   for _, f := range files {
     inode := atomic.AddUint64(&nextInode, 1)
-    fileById[f.Id] = Node{*f, nil, inode, client}
+    fileById[f.Id] = &Node{*f, nil, inode, client}
   }
   for _, f := range fileById {
     for _, p := range f.Parents {
-      var parent, ok = fileById[p.Id]
+      parent, ok := fileById[p.Id]
       if !ok {
         log.Printf("parent of %s not found, expected %s", f.Title, p.Id)
       }
-      self := fileById[f.Id]
-      parent.Children = append(parent.Children, &self)
-      fileById[p.Id] = parent
+      if parent.Children == nil {
+        parent.Children = make(map[string]*Node)
+      }
+      parent.Children[f.Title] = f
     }
   }
-  tree := FS{fileById[rootId]}
+  tree := FS{*fileById[rootId]}
 
   http.Handle("/files", FilesPage{files})
-  http.Handle("/tree", TreePage{fileById[rootId]})
+  http.Handle("/tree", TreePage{*fileById[rootId]})
 
 	c, err := fuse.Mount(
 		mountpoint,
