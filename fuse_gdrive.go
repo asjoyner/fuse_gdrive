@@ -96,17 +96,17 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
   }
   // See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
   // https://developers.google.com/drive/web/manage-downloads#partial_download
-  spec := fmt.Sprintf("bytes=%s-%s", req.Offset, req.Size)
+  spec := fmt.Sprintf("bytes=%d-%d", req.Offset, req.Offset+int64(req.Size)-1)
   dlReq.Header.Add("Range", spec)
-  log.Println("Requesting partial size: ", spec)
 
   dlResp, err := n.client.Do(dlReq)
-  // Make sure we close the Body later
-  defer dlResp.Body.Close()
+  defer dlResp.Body.Close() // Make sure we close the Body later
   if err != nil {
     return err
   }
-  log.Println("HTTP status response: ", dlResp.StatusCode)
+  if dlResp.StatusCode != 206 && dlResp.StatusCode != 200 {
+    return fmt.Errorf("Failed to retrieve file, got HTTP status %v want 206 or 200", dlResp.StatusCode)
+  }
   body, err := ioutil.ReadAll(dlResp.Body)
   resp.Data = body
 	return nil
