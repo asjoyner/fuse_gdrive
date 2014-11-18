@@ -7,7 +7,6 @@ package main
 import (
 	"flag"
 	"fmt"
-  "io/ioutil"
   "net/http"
 	"log"
 	"os"
@@ -18,6 +17,8 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	_ "bazil.org/fuse/fs/fstestutil"
+
+  "github.com/asjoyner/fuse_gdrive/cache"
 )
 
 var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
@@ -90,25 +91,11 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
   if n.DownloadUrl == "" { // If there is no downloadUrl, there is no body
     return nil
   }
-  dlReq, err := http.NewRequest("GET", n.DownloadUrl, nil)
+  b, err := cache.Read(n.DownloadUrl, req.Offset, int64(req.Size), n.FileSize)
   if err != nil {
-    return err
+    return fmt.Errorf("cache.Read (..%v..): %v", req.Offset, err)
   }
-  // See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
-  // https://developers.google.com/drive/web/manage-downloads#partial_download
-  spec := fmt.Sprintf("bytes=%d-%d", req.Offset, req.Offset+int64(req.Size)-1)
-  dlReq.Header.Add("Range", spec)
-
-  dlResp, err := n.client.Do(dlReq)
-  defer dlResp.Body.Close() // Make sure we close the Body later
-  if err != nil {
-    return err
-  }
-  if dlResp.StatusCode != 206 && dlResp.StatusCode != 200 {
-    return fmt.Errorf("Failed to retrieve file, got HTTP status %v want 206 or 200", dlResp.StatusCode)
-  }
-  body, err := ioutil.ReadAll(dlResp.Body)
-  resp.Data = body
+  resp.Data = b
 	return nil
 }
 
@@ -126,6 +113,9 @@ func main() {
   go http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
 
   client := getOAuthClient(drive.DriveReadonlyScope)
+
+  cache.Configure("/tmp", client)
+
   service, _ := drive.New(client)
   files, err := AllFiles(service)
   log.Println("Num files in Drive: ", len(files))

@@ -5,7 +5,7 @@ import (
   "fmt"
 )
 
-// AllFiles fetches and displays all files
+// AllFiles fetches and returns all files
 // TODO(asjoyner): optimize later, request only what we end up using:
 // https://developers.google.com/gdata/docs/2.0/basics#PartialResponse
 func AllFiles(d *drive.Service) ([]*drive.File, error) {
