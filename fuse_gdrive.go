@@ -147,6 +147,8 @@ func main() {
       parent, ok := fileById[p.Id]
       if !ok {
         log.Printf("parent of %s not found, expected %s", f.Title, p.Id)
+	rootNode.Children[f.Title] = f
+	continue
       }
       if parent.Children == nil {
         parent.Children = make(map[string]*Node)
