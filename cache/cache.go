@@ -8,19 +8,26 @@ import (
   "net/http"
   "sync"
   "time"
+
+  "github.com/dustin/go-humanize"
 )
 
 var dc = DriveCache{
   path: "/tmp",
   client: nil,
   chunkSize: 10*1024*1024,
-  maxChunks: 3,
+  maxChunks: 2,
   files: make(map[string]*File),
+  req: make(chan int)
 }
 
+// Configure sets the cache dir and oauth client.
+// It also starts a goroutine to fetch chunks, so it must be called before
+// Read().
 func Configure(path string, client *http.Client) {
   dc.path = path
   dc.client = client
+  go Fetcher(req)
 }
 
 type DriveCache struct {
@@ -30,6 +37,8 @@ type DriveCache struct {
   maxChunks int32
   files map[string]*File
 }
+
+func Fetcher(req chan int)
 
 func Read(url string, offset int64, size int64, max int64) ([]byte, error) {
   f, ok := dc.files[url]
@@ -66,9 +75,7 @@ func DropOldest() {
     delete(oF.atime, oN)
     delete(oF.local, oN)
   } else if numEntries > dc.maxChunks {
-    log.Printf("Too many chunks: %v", numEntries)
-  } else {
-    log.Printf("Number of chunks: %v", numEntries)
+    log.Printf("Too many chunks!", numEntries)
   }
 }
 
@@ -78,7 +85,6 @@ type File struct {
   local map[int64][]byte
   atime map[int64]time.Time
   sync.RWMutex
-  cleanup func()  // do this work?
 }
 
 func NewFile(url string, size int64) *File {
@@ -104,9 +110,11 @@ func (f *File) Read(offset int64, size int64) ([]byte, error) {
   chunkOffset := offset % dc.chunkSize
   copied := copy(response, chunk[chunkOffset:])
   if n == (offset+size) / dc.chunkSize {  // read satisfied by this chunk
+    /*
     if chunkOffset == 0 {
-      log.Println("Warming the next chunk into the cache.")
+      log.Printf("Warming chunk %d into the cache.", n+1)
       go f.GetChunk(n+1) }
+    */
     return response, nil
   }
 
@@ -144,6 +152,7 @@ func (f *File) GetChunk(n int64) ([]byte, error) {
   spec := fmt.Sprintf("bytes=%d-%d", cs, ce)
   req.Header.Add("Range", spec)
 
+  getRate := MeasureTransferRate()
   resp, err := dc.client.Do(req)
   if err != nil {
     return nil, fmt.Errorf("client.Do: %v", err)
@@ -152,6 +161,7 @@ func (f *File) GetChunk(n int64) ([]byte, error) {
     return nil, fmt.Errorf("Failed to retrieve file, got HTTP status %v, want 206 or 200, asked for: %v", resp.StatusCode, spec)
   }
   chunk, err := ioutil.ReadAll(resp.Body)
+  log.Printf("Chunk %d transferred at %v", n, getRate(int64(len(chunk))))
   if err != nil {
     return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
   }
@@ -160,4 +170,15 @@ func (f *File) GetChunk(n int64) ([]byte, error) {
   //f.Unlock()
   go DropOldest()
   return chunk, nil
+}
+
+// Credit to github.com/prasmussen/gdrive/cli for inspiration
+func MeasureTransferRate() func(int64) string {
+  start := time.Now()
+
+  return func(bytes int64) string {
+    seconds := time.Now().Sub(start).Seconds()
+    kbps := int64((float64(bytes) / seconds) / 1024)
+    return fmt.Sprintf("%s KB/s", humanize.Comma(kbps))
+  }
 }
