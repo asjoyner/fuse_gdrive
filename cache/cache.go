@@ -2,6 +2,7 @@
 package cache
 
 import (
+  "flag"
   "fmt"
   "io/ioutil"
   "log"
@@ -10,24 +11,26 @@ import (
   "time"
 
   "github.com/dustin/go-humanize"
+  "github.com/golang/groupcache/lru"
 )
+
+var chunkSize = flag.Int64("chunksize", 20*1024*1024, "Size of each chunk read from Google Drive.")
+var numChunks = flag.Int64("numchunks", 2, "The number of chunks to keep in ram at a time.")
 
 var dc = DriveCache{
   path: "/tmp",
   client: nil,
-  chunkSize: 10*1024*1024,
-  maxChunks: 2,
-  files: make(map[string]*File),
-  req: make(chan int)
+  chunkSize: *chunkSize,
+  lru: lru.New(2),
+  request: make(chan *fetchRequest),
 }
 
 // Configure sets the cache dir and oauth client.
-// It also starts a goroutine to fetch chunks, so it must be called before
-// Read().
+// It starts the goroutine to fetch chunks; it must be called before Read().
 func Configure(path string, client *http.Client) {
   dc.path = path
   dc.client = client
-  go Fetcher(req)
+  go Fetcher(dc.request)
 }
 
 type DriveCache struct {
@@ -35,119 +38,130 @@ type DriveCache struct {
   client *http.Client
   chunkSize int64
   maxChunks int32
-  files map[string]*File
-}
-
-func Fetcher(req chan int)
-
-func Read(url string, offset int64, size int64, max int64) ([]byte, error) {
-  f, ok := dc.files[url]
-  if !ok {
-    f = NewFile(url, max)
-    dc.files[url] = f
-  }
-  b, err := f.Read(offset, size)
-  return b, err
-}
-
-// Find the oldest timestamp and remove it
-// TODO: This is racy, maybe sync DropOldest runs against the DriveCache struct?
-func DropOldest() {
-  var numEntries int32
-  var oT = time.Now()
-  var oF *File
-  var oN int64
-  for _, f := range dc.files {
-    //f.RLock()
-    //defer f.RUnlock()
-    for n, t := range f.atime {
-      numEntries++
-      if t.Before(oT) {
-        oT = t
-        oF = f
-        oN = n
-      }
-    }
-  }
-  //oF.Lock()
-  //defer oF.Unlock()
-  if numEntries >= dc.maxChunks {
-    delete(oF.atime, oN)
-    delete(oF.local, oN)
-  } else if numEntries > dc.maxChunks {
-    log.Printf("Too many chunks!", numEntries)
-  }
-}
-
-type File struct {
-  url string
-  size int64
-  local map[int64][]byte
-  atime map[int64]time.Time
+  lru *lru.Cache
+  request chan *fetchRequest
   sync.RWMutex
 }
 
-func NewFile(url string, size int64) *File {
-  return &File{
-    // Maps, because even a sparse slice would still use a lot more ram
-    url: url,
-    size: size,
-    local: make(map[int64][]byte),
-    atime: make(map[int64]time.Time),
+type chunk struct {
+  url string
+  size int64
+  max int64
+  n int64
+}
+
+type fetchRequest struct {
+  c chunk
+  find sync.WaitGroup
+  fill sync.WaitGroup
+  chunkBytes *[]byte
+  err error
+}
+
+func Fetcher(in chan *fetchRequest) {
+  var queueLock sync.RWMutex
+  queue := make(map[chunk]*fetchRequest)
+  for {
+    fr := <-in
+    queueLock.RLock()
+    inProgressFr, ok := queue[fr.c]
+    queueLock.RUnlock()
+    if ok {
+      // fr.find needs to be separate, so we can copy fr.fill in place before
+      // the caller fr.fill.Wait()s
+      fr.fill = inProgressFr.fill
+      fr.find.Done()
+      continue
+    }
+    fr.fill.Add(1)
+    queueLock.Lock()
+    queue[fr.c] = fr
+    queueLock.Unlock()
+    go func () {
+      chunkBytes, err := getChunk(fr.c)
+      if err != nil {
+        fr.err = fmt.Errorf("getChunk(%+v) failed: %v", fr.c, err)
+      } else {
+        dc.Lock()
+        dc.lru.Add(fr.c, chunkBytes)
+        dc.Unlock()
+
+        queueLock.Lock()
+        delete(queue, fr.c)
+        queueLock.Unlock()
+      }
+      fr.find.Done()
+      fr.fill.Done()
+    } ()
   }
 }
 
-func (f *File) Read(offset int64, size int64) ([]byte, error) {
-  if size > dc.chunkSize {
-    log.Fatal("You're doing it wrong.")
-  }
+func Read(url string, offset int64, size int64, max int64) ([]byte, error) {
+  var copied int = 0
+  var chunkBytes []byte
   n := offset / dc.chunkSize
-  chunk, err := f.GetChunk(n)
-  if err != nil {
-    return nil, err
-  }
   response := make([]byte, size)
-  chunkOffset := offset % dc.chunkSize
-  copied := copy(response, chunk[chunkOffset:])
-  if n == (offset+size) / dc.chunkSize {  // read satisfied by this chunk
-    /*
-    if chunkOffset == 0 {
-      log.Printf("Warming chunk %d into the cache.", n+1)
-      go f.GetChunk(n+1) }
-    */
-    return response, nil
+  for {
+    c := chunk{url: url, size: size, max: max, n: n}  // uniquely identify the chunk
+    dc.RLock()
+    cb, ok := dc.lru.Get(c)  // look in cache
+    dc.RUnlock()
+    if ok {
+      cb, ok := cb.([]byte)
+      if ok {
+        chunkBytes = cb
+      } else {
+        return nil, fmt.Errorf("cache error, expected []byte, got %v", cb)
+      }
+    } else {
+      fr := fetchRequest{c: c}
+      fr.find.Add(1)
+      dc.request <- &fr  // request cache fill
+      fr.find.Wait()   // block on cache lookup
+      fr.fill.Wait()   // block on cache fill completion
+      if fr.err != nil {
+        return nil, fr.err
+      }
+      dc.RLock()
+      cb, ok := dc.lru.Get(c)  // get from cache, now that it's filled
+      dc.RUnlock()
+      if ok {
+        cb, ok := cb.([]byte)
+        if ok {
+          chunkBytes = cb
+        } else {
+          return nil, fmt.Errorf("cache error, expected []byte, got %v", cb)
+        }
+      } else {
+        return nil, fmt.Errorf("Cache miss immediately after fill: %s", url)
+      }
+    }
+    chunkOffset := (offset + int64(copied)) % dc.chunkSize
+    copied += copy(response[copied:], chunkBytes[chunkOffset:])
+
+    if n == (offset+size) / dc.chunkSize {  // read satisfied by this chunk
+      return response, nil
+    } else { // ugh, the read extends into the next chunk
+      n++
+    }
   }
 
-  // ugh, the read extends into the next chunk
-  chunk, err = f.GetChunk(n+1)
-  if err != nil {
-    return nil, fmt.Errorf("GetChunk: %v", err)
-  }
-  copy(response[copied:], chunk)
-  return response, nil
 }
 
-func (f *File) GetChunk(n int64) ([]byte, error) {
-  //f.Lock()
-  f.atime[n] = time.Now()
-  if chunk, ok := f.local[n]; ok {
-    //f.Unlock()
-    return chunk, nil
-  }
-  //f.Unlock()
-  req, err := http.NewRequest("GET", f.url, nil)
+func getChunk(c chunk) ([]byte, error) {
+  req, err := http.NewRequest("GET", c.url, nil)
   if err != nil {
     return nil, err
   }
   // See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
   // https://developers.google.com/drive/web/manage-downloads#partial_download
-  cs := n * dc.chunkSize
-  if cs > f.size {
+  cs := c.n * dc.chunkSize
+  if cs > c.max {
     return nil, fmt.Errorf("chunk requested that starts past EOF (%v)", cs)
   }
   ce := cs+dc.chunkSize
-  if ce > f.size {
-    ce = f.size
+  if ce > c.max {
+    ce = c.max
   }
   spec := fmt.Sprintf("bytes=%d-%d", cs, ce)
   req.Header.Add("Range", spec)
@@ -160,16 +174,12 @@ func (f *File) GetChunk(n int64) ([]byte, error) {
   if resp.StatusCode != 206 && resp.StatusCode != 200 {
     return nil, fmt.Errorf("Failed to retrieve file, got HTTP status %v, want 206 or 200, asked for: %v", resp.StatusCode, spec)
   }
-  chunk, err := ioutil.ReadAll(resp.Body)
-  log.Printf("Chunk %d transferred at %v", n, getRate(int64(len(chunk))))
+  chunkBytes, err := ioutil.ReadAll(resp.Body)
+  log.Printf("Chunk %d transferred at %v", c.n, getRate(int64(len(chunkBytes))))
   if err != nil {
     return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
   }
-  //f.Lock()
-  f.local[n] = chunk
-  //f.Unlock()
-  go DropOldest()
-  return chunk, nil
+  return chunkBytes, nil
 }
 
 // Credit to github.com/prasmussen/gdrive/cli for inspiration

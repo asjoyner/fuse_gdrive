@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
   "net/http"
+  _ "net/http/pprof"
 	"log"
 	"os"
   "sync/atomic"
