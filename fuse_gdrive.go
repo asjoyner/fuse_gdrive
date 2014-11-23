@@ -11,6 +11,7 @@ import (
   _ "net/http/pprof"
 	"log"
 	"os"
+  "os/signal"
   "sync/atomic"
 
   drive "code.google.com/p/google-api-go-client/drive/v2"
@@ -200,6 +201,15 @@ func main() {
 		log.Fatal(err)
 	}
 	defer c.Close()
+
+  // Trap control-c (sig INT) and unmount
+  sig := make(chan os.Signal, 1)
+  signal.Notify(sig, os.Interrupt)
+  go func(){
+    for _ = range sig {
+      fuse.Unmount(mountpoint)
+    }
+  }()
 
 	err = fs.Serve(c, tree)
 	if err != nil {
