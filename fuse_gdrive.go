@@ -23,6 +23,7 @@ import (
 )
 
 var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
+var allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
 
 var nextInode uint64 = 0
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
@@ -161,13 +162,18 @@ func main() {
   http.Handle("/files", FilesPage{files})
   http.Handle("/tree", TreePage{*fileById[rootId]})
 
-	c, err := fuse.Mount(
-		mountpoint,
+  options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),
 		fuse.Subtype("gdrive"),
 		fuse.LocalVolume(),
 		fuse.VolumeName(about.User.EmailAddress),
-	)
+  }
+
+  if *allowOther {
+    options = append(options, fuse.AllowOther())
+  }
+
+	c, err := fuse.Mount(mountpoint, options...)
 	if err != nil {
 		log.Fatal(err)
 	}
