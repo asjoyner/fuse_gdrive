@@ -12,6 +12,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"sync"
 
 	drive "code.google.com/p/google-api-go-client/drive/v2"
 
@@ -27,6 +28,10 @@ var allowOther = flag.Bool("allow_other", false, "If other users are allowed to 
 
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
+var account string
+var rootId string
+var rootChildren map[string]*Node
+var childLock sync.RWMutex
 
 var Usage = func() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -53,6 +58,7 @@ type Node struct {
 	isDir bool
 	FileSize int64
 	DownloadUrl string
+	isRoot bool // lookups handled differently, because fuse takes a copy of it
 }
 
 func (n Node) Attr() fuse.Attr {
@@ -66,7 +72,13 @@ func (n Node) Attr() fuse.Attr {
 func (n Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 	var dirs []fuse.Dirent
 	var childType fuse.DirentType
-	for _, child := range n.Children {
+	children := n.Children
+	if n.isRoot {
+		childLock.RLock()
+		defer childLock.RUnlock()
+		children = rootChildren
+	}
+	for _, child := range children {
 		if child.isDir {
 			childType = fuse.DT_Dir
 		} else {
@@ -79,7 +91,13 @@ func (n Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 }
 
 func (n Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
-	if child, ok := n.Children[name]; ok {
+	children := n.Children
+	if n.isRoot {
+		childLock.RLock()
+		defer childLock.RUnlock()
+		children = rootChildren
+	}
+	if child, ok := children[name]; ok {
 		return child, nil
 	}
 	return Node{}, fuse.ENOENT
@@ -136,28 +154,29 @@ func main() {
 
 	cache.Configure("/tmp", client)
 
-	rootNode, fileById, account, err := getNodes(client)
+	service, _ := drive.New(client)
+	about, err := service.About.Get().Do()
 	if err != nil {
-		log.Fatal("failed to get Nodes from Drive: %s", err)
+		log.Fatalf("drive.service.About.Get.Do: %v\n", err)
 	}
-	for _, f := range fileById {
-		for _, pId := range f.Parents {
-			parent, ok := fileById[pId]
-			if !ok {
-				log.Printf("parent of %s not found, expected %s", f.Title, pId)
-				rootNode.Children[f.Title] = f
-				continue
-			}
-			if parent.Children == nil {
-				parent.Children = make(map[string]*Node)
-			}
-			parent.Children[f.Title] = f
-		}
+	rootId = about.RootFolderId
+	account = about.User.EmailAddress
+
+	// Populate the initial filesystem as a single empty node
+	rootNode := Node{Id: rootId,
+				Children: make(map[string]*Node),
+				Inode: 1,  // The root of the tree is always 1
+				Title: "/",
+				isDir: true,
+				isRoot: true,
 	}
-	tree := FS{rootNode}
+	tree := FS{root: rootNode}
+
+	// periodically refresh the FS with the list of files from Drive
+	go updateFS(service, tree)
 
 	//http.Handle("/files", FilesPage{files})
-	http.Handle("/tree", TreePage{rootNode})
+	//http.Handle("/tree", TreePage{tree})
 
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),

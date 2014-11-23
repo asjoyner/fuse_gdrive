@@ -1,18 +1,21 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"net/http"
+	"log"
 	"sync/atomic"
+	"time"
 
 	"code.google.com/p/google-api-go-client/drive/v2"
 )
 
-var nextInode uint64 = 0
+var driveRefresh = flag.Duration("refresh", 5 * time.Minute, "how often to refresh the list of files and directories from Google Drive.")
 
-// AllFiles fetches and returns all files
-// TODO(asjoyner): optimize later, request only what we end up using:
-// https://developers.google.com/gdata/docs/2.0/basics#PartialResponse
+// The root of the tree is always one, we increment from there.
+var nextInode uint64 = 1
+
+// AllFiles fetches and returns all files in Google Drive
 func AllFiles(d *drive.Service) ([]*drive.File, error) {
 	var fs []*drive.File
 	pageToken := ""
@@ -36,30 +39,22 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 	return fs, nil
 }
 
-
-func getNodes(oauthClient *http.Client) (Node, map[string]*Node, string, error) {
-	service, _ := drive.New(oauthClient)
+// getNodes returns a map of unique IDs to the Node it describes
+func getNodes(service *drive.Service) (map[string]*Node, error) {
 	files, err := AllFiles(service)
-	fmt.Println("Number of files in Drive: ", len(files))
 	if err != nil {
-		return Node{}, nil, "", fmt.Errorf("failed to list files in drive: ", err)
+		return nil, fmt.Errorf("failed to list files in drive: ", err)
 	}
 
-	about, err := service.About.Get().Do()
-	if err != nil {
-		return Node{}, nil, "", fmt.Errorf("drive.service.About.Get.Do: %v\n", err)
-	}
-	rootId := about.RootFolderId
-	account := about.User.EmailAddress
-
-	// build a tree representation of nodes in a filesystem, for fuse
-	fileById := make(map[string]*Node, len(files))
 	// synthesize the root of the drive tree
 	rootNode := Node{Children: make(map[string]*Node),
-									 Inode: atomic.AddUint64(&nextInode, 1),
+									 Inode: 1,  // The root of the tree is always 1
 									 Title: "/",
 									 isDir: true,
+									 isRoot: true,
 	}
+
+	fileById := make(map[string]*Node, len(files))
 	fileById[rootId] = &rootNode
 
 	for _, f := range files {
@@ -82,5 +77,43 @@ func getNodes(oauthClient *http.Client) (Node, map[string]*Node, string, error) 
 		}
 		fileById[f.Id] = node
 	}
-	return rootNode, fileById, account, nil
+	return fileById, nil
+}
+
+// updateFS polls Google Drive for the list of files, and updates the fuse FS
+func updateFS(service *drive.Service, fs FS) (Node, error) {
+	// TODO: setup a http.Handler to allow forcing a refresh
+	for {
+		fileById, err := getNodes(service)
+		if err != nil {
+			log.Printf("failed to get Nodes from Drive: %s", err)
+		}
+		newRootNode, ok := fileById[rootId]
+		if !ok {
+			log.Printf("can not refresh tree: fileById[rootId] for (%v) not found", rootId)
+			continue
+		}
+		for _, f := range fileById {
+			for _, pId := range f.Parents {
+				parent, ok := fileById[pId]
+				if !ok {
+					log.Printf("parent of %s not found, expected %s", f.Title, pId)
+					newRootNode.Children[f.Title] = f
+					continue
+				}
+				if parent.Children == nil {
+					parent.Children = make(map[string]*Node)
+				}
+				parent.Children[f.Title] = f
+			}
+		}
+		fmt.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
+		childLock.Lock()
+		rootChildren = make(map[string]*Node, len(newRootNode.Children))
+		for _, c := range newRootNode.Children {
+			rootChildren[c.Title] = c
+		}
+		childLock.Unlock()
+		time.Sleep(*driveRefresh)
+	}
 }
