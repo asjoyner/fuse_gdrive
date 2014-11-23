@@ -101,6 +101,23 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
 	return nil
 }
 
+func sanityCheck(mountpoint string) error {
+  fileInfo, err := os.Stat(mountpoint);
+  if os.IsNotExist(err) {
+    if err := os.MkdirAll(mountpoint, 0777); err != nil {
+      return fmt.Errorf("mountpoint does not exist, attempting to create it.")
+    }
+    return nil
+  }
+  if err != nil {
+    return fmt.Errorf("error stat()ing mountpoint: %s", err)
+  }
+  if !fileInfo.IsDir() {
+    return fmt.Errorf("the mountpoint is not a directory")
+  }
+  return nil
+}
+
 func main() {
 	flag.Usage = Usage
 	flag.Parse()
@@ -110,6 +127,11 @@ func main() {
 		os.Exit(2)
 	}
 	mountpoint := flag.Arg(0)
+
+  if err := sanityCheck(mountpoint); err != nil {
+    fmt.Printf("sanityCheck failed: %s\n", err)
+    os.Exit(1)
+  }
 
   http.HandleFunc("/", RootHandler)
   go http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
