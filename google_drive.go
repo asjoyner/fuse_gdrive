@@ -27,7 +27,6 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 		}
 		r, err := q.Do()
 		if err != nil {
-			fmt.Printf("An error occurred: %v\n", err)
 			return fs, err
 		}
 		fs = append(fs, r.Items...)
@@ -43,7 +42,7 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 func getNodes(service *drive.Service) (map[string]*Node, error) {
 	files, err := AllFiles(service)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list files in drive: ", err)
+		return nil, fmt.Errorf("failed to list files in drive: %v", err)
 	}
 
 	// synthesize the root of the drive tree
@@ -87,7 +86,8 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 	for {
 		fileById, err := getNodes(service)
 		if err != nil {
-			log.Printf("failed to get Nodes from Drive: %s", err)
+			log.Printf("error updating filesystem, getNodes: %s", err)
+			continue
 		}
 		newRootNode, ok := fileById[rootId]
 		if !ok {
