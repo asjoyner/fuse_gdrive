@@ -62,6 +62,7 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 		if f.MimeType == driveFolderMimeType {
 			isDir = true
 		}
+		// TODO: reuse inodes; don't generate a whole new set every getNodes
 		node := &Node{Id: f.Id,
 									Inode: atomic.AddUint64(&nextInode, 1),
 									Title: f.Title,

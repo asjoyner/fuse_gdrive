@@ -17,19 +17,19 @@ import (
 var chunkSize = flag.Int64("chunksize", 20*1024*1024, "Size of each chunk read from Google Drive.")
 var numChunks = flag.Int64("numchunks", 2, "The number of chunks to keep in ram at a time.")
 
-var dc = DriveCache{
-	path:      "/tmp",
-	client:    nil,
-	chunkSize: *chunkSize,
-	lru:       lru.New(2),
-	request:   make(chan *fetchRequest),
-}
+var dc DriveCache
 
 // Configure sets the cache dir and oauth client.
 // It starts the goroutine to fetch chunks; it must be called before Read().
 func Configure(path string, client *http.Client) {
-	dc.path = path
-	dc.client = client
+	dc = DriveCache{
+		path:      path,
+		client:    client,
+		chunkSize: *chunkSize,
+		lru:       lru.New(int(*numChunks)),
+		request:   make(chan *fetchRequest),
+	}
+
 	go Fetcher(dc.request)
 }
 
@@ -175,7 +175,7 @@ func getChunk(c chunk) ([]byte, error) {
 		return nil, fmt.Errorf("Failed to retrieve file, got HTTP status %v, want 206 or 200, asked for: %v", resp.StatusCode, spec)
 	}
 	chunkBytes, err := ioutil.ReadAll(resp.Body)
-	log.Printf("Chunk %d transferred at %v", c.n, getRate(int64(len(chunkBytes))))
+	log.Printf("Chunk %d transferred at %v (cache len: %d)", c.n, getRate(int64(len(chunkBytes))), dc.lru.Len())
 	if err != nil {
 		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
 	}
