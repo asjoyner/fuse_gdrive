@@ -32,7 +32,7 @@ var secret = flag.String("secret", "", "OAuth Client Secret.  If non-empty, over
 var secretFile = flag.String("secret_file", "clientsecret",
 	"Name of a file containing just the project's OAuth Client Secret from https://console.developers.google.com/project/<project-id>/apiui/credential")
 var cacheToken = flag.Bool("cachetoken", true, "cache the OAuth token")
-var debug = flag.Bool("debug", false, "show HTTP traffic")
+var httpDebug = flag.Bool("http.debug", false, "show HTTP traffic")
 
 func osUserCacheDir() string {
 	switch runtime.GOOS {

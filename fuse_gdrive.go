@@ -25,7 +25,7 @@ import (
 
 var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
 var allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
-var debug = flag.Bool("gdrive.debug", true, "print debug statements from the fuse_gdrive package")
+var debugGdrive = flag.Bool("gdrive.debug", true, "print debug statements from the fuse_gdrive package")
 
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
@@ -33,6 +33,10 @@ var account string
 var rootId string
 var rootChildren map[string]*Node
 var childLock sync.RWMutex
+
+var debug debugging
+
+type debugging bool
 
 func (d debugging) Printf(format string, args ...interface{}) {
 	if d {
@@ -157,6 +161,10 @@ func main() {
 		os.Exit(2)
 	}
 	mountpoint := flag.Arg(0)
+
+	if *debugGdrive {
+		debug = true
+	}
 
 	if err := sanityCheck(mountpoint); err != nil {
 		log.Fatalf("sanityCheck failed: %s\n", err)
