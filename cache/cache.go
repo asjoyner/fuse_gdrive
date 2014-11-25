@@ -45,9 +45,8 @@ type DriveCache struct {
 
 type chunk struct {
 	url  string
-	size int64
-	max  int64
 	n    int64
+	max  int64
 }
 
 type fetchRequest struct {
@@ -101,7 +100,7 @@ func Read(url string, offset int64, size int64, max int64) ([]byte, error) {
 	n := offset / dc.chunkSize
 	response := make([]byte, size)
 	for {
-		c := chunk{url: url, size: size, max: max, n: n} // uniquely identify the chunk
+		c := chunk{url: url, max: max, n: n} // uniquely identify the chunk
 		dc.RLock()
 		cb, ok := dc.lru.Get(c) // look in cache
 		dc.RUnlock()
