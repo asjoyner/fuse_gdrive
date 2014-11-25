@@ -58,6 +58,7 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 
 	for _, f := range files {
 		var isDir bool
+		// TODO: drop trashed files here, or in the AllFiles query is possible
 		if f.MimeType == driveFolderMimeType {
 			isDir = true
 		}
@@ -94,6 +95,8 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 			log.Printf("can not refresh tree: fileById[rootId] for (%v) not found", rootId)
 			continue
 		}
+
+		dupes := make(map[string]*Node)
 		for _, f := range fileById {
 			for _, pId := range f.Parents {
 				parent, ok := fileById[pId]
@@ -105,9 +108,23 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 				if parent.Children == nil {
 					parent.Children = make(map[string]*Node)
 				}
-				parent.Children[f.Title] = f
+				if conflict, ok := parent.Children[f.Title]; ok {
+					dupes[f.Title] = parent
+					conflictWithDocid := fmt.Sprintf("%s.%s", conflict.Title, conflict.Id)
+					parent.Children[conflictWithDocid] = conflict
+					fWithDocid := fmt.Sprintf("%s.%s", f.Title, f.Id)
+					parent.Children[fWithDocid] = f
+					debug.Printf("Found conflicting file (%s/%s), added additional dir entries: %s, %s", parent.Title, conflict.Title, conflictWithDocid, fWithDocid)
+				} else {
+					parent.Children[f.Title] = f
+				}
 			}
 		}
+
+		for conflict, parent := range dupes {
+			delete(parent.Children, conflict)
+		}
+
 		fmt.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
 		childLock.Lock()
 		rootChildren = make(map[string]*Node, len(newRootNode.Children))

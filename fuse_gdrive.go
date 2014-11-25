@@ -97,13 +97,13 @@ func (n Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 		defer childLock.RUnlock()
 		children = rootChildren
 	}
-	for _, child := range children {
+	for filename, child := range children {
 		if child.isDir {
 			childType = fuse.DT_Dir
 		} else {
 			childType = fuse.DT_File
 		}
-		entry := fuse.Dirent{Inode: child.Inode, Name: child.Title, Type: childType}
+		entry := fuse.Dirent{Inode: child.Inode, Name: filename, Type: childType}
 		dirs = append(dirs, entry)
 	}
 	return dirs, nil
