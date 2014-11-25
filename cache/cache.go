@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dustin/go-humanize"
 	"github.com/asjoyner/fuse_gdrive/lru"
+	"github.com/dustin/go-humanize"
 )
 
 var chunkSize = flag.Int64("chunksize", 20*1024*1024, "Size of each chunk read from Google Drive.")

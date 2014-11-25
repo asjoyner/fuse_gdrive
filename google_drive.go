@@ -10,7 +10,7 @@ import (
 	"code.google.com/p/google-api-go-client/drive/v2"
 )
 
-var driveRefresh = flag.Duration("refresh", 5 * time.Minute, "how often to refresh the list of files and directories from Google Drive.")
+var driveRefresh = flag.Duration("refresh", 5*time.Minute, "how often to refresh the list of files and directories from Google Drive.")
 
 // The root of the tree is always one, we increment from there.
 var nextInode uint64 = 1
@@ -47,10 +47,10 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 
 	// synthesize the root of the drive tree
 	rootNode := Node{Children: make(map[string]*Node),
-									 Inode: 1,  // The root of the tree is always 1
-									 Title: "/",
-									 isDir: true,
-									 isRoot: true,
+		Inode:  1, // The root of the tree is always 1
+		Title:  "/",
+		isDir:  true,
+		isRoot: true,
 	}
 
 	fileById := make(map[string]*Node, len(files))
@@ -63,11 +63,11 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 		}
 		// TODO: reuse inodes; don't generate a whole new set every getNodes
 		node := &Node{Id: f.Id,
-									Inode: atomic.AddUint64(&nextInode, 1),
-									Title: f.Title,
-									isDir: isDir,
-									FileSize: f.FileSize,
-									DownloadUrl: f.DownloadUrl,
+			Inode:       atomic.AddUint64(&nextInode, 1),
+			Title:       f.Title,
+			isDir:       isDir,
+			FileSize:    f.FileSize,
+			DownloadUrl: f.DownloadUrl,
 		}
 		if len(f.Parents) > 0 {
 			node.Parents = make([]string, len(f.Parents))

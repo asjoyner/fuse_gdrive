@@ -50,15 +50,15 @@ func (s FS) Root() (fs.Node, fuse.Error) {
 
 // Node represents a file (or folder) in Drive.
 type Node struct {
-	Id string
-	Children map[string]*Node
-	Parents []string
-	Inode    uint64
-	Title	string
-	isDir bool
-	FileSize int64
+	Id          string
+	Children    map[string]*Node
+	Parents     []string
+	Inode       uint64
+	Title       string
+	isDir       bool
+	FileSize    int64
 	DownloadUrl string
-	isRoot bool // lookups handled differently, because fuse takes a copy of it
+	isRoot      bool // lookups handled differently, because fuse takes a copy of it
 }
 
 func (n Node) Attr() fuse.Attr {
@@ -119,7 +119,7 @@ func sanityCheck(mountpoint string) error {
 	fileInfo, err := os.Stat(mountpoint)
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(mountpoint, 0777); err != nil {
-			return fmt.Errorf("mountpoint does not exist, attempting to create it.")
+			return fmt.Errorf("mountpoint does not exist, could not create it.")
 		}
 		return nil
 	}
@@ -164,11 +164,11 @@ func main() {
 
 	// Populate the initial filesystem as a single empty node
 	rootNode := Node{Id: rootId,
-				Children: make(map[string]*Node),
-				Inode: 1,  // The root of the tree is always 1
-				Title: "/",
-				isDir: true,
-				isRoot: true,
+		Children: make(map[string]*Node),
+		Inode:    1, // The root of the tree is always 1
+		Title:    "/",
+		isDir:    true,
+		isRoot:   true,
 	}
 	tree := FS{root: rootNode}
 

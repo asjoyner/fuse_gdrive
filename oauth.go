@@ -68,6 +68,14 @@ func tokenFromFile(file string) (*oauth.Token, error) {
 }
 
 func saveToken(file string, token *oauth.Token) {
+	cacheDir := osUserCacheDir()
+	_, err := os.Stat(cacheDir)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(cacheDir, 0777); err != nil {
+			log.Printf("Warning: failed to cache oauth token: cache dir does not exist, could not create it: %v", err)
+			return
+		}
+	}
 	f, err := os.Create(file)
 	if err != nil {
 		log.Printf("Warning: failed to cache oauth token: %v", err)
