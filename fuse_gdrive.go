@@ -48,6 +48,14 @@ func (s FS) Root() (fs.Node, fuse.Error) {
 	return s.root, nil
 }
 
+// don't think this does anything?  still don't see async reads  :-/
+func (fs FS) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
+	// fmt.Println("Init flags: %+v", req.Flags.String())
+	resp.MaxWrite = 128 * 1024
+	resp.Flags = fuse.InitBigWrites & fuse.InitAsyncRead
+	return nil
+}
+
 // Node represents a file (or folder) in Drive.
 type Node struct {
 	Id          string

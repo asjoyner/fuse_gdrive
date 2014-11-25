@@ -63,18 +63,17 @@ func Fetcher(in chan *fetchRequest) {
 	queue := make(map[chunk]*fetchRequest)
 	for {
 		fr := <-in
-		queueLock.RLock()
+		queueLock.Lock()  // if not found, we need to add it before unlock
 		inProgressFr, ok := queue[fr.c]
-		queueLock.RUnlock()
 		if ok {
-			// fr.find needs to be separate, so we can copy fr.fill in place before
+			// fr.find needs to be separate, so we can update fr.fill in place before
 			// the caller fr.fill.Wait()s
 			fr.fill = inProgressFr.fill
 			fr.find.Done()
+			queueLock.Unlock()
 			continue
 		}
 		fr.fill.Add(1)
-		queueLock.Lock()
 		queue[fr.c] = fr
 		queueLock.Unlock()
 		go func() {
@@ -171,6 +170,7 @@ func getChunk(c chunk) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("client.Do: %v", err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 206 && resp.StatusCode != 200 {
 		return nil, fmt.Errorf("Failed to retrieve file, got HTTP status %v, want 206 or 200, asked for: %v", resp.StatusCode, spec)
 	}
