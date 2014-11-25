@@ -1,0 +1,5 @@
+All the credit goes to bradfitz.  I simply pulled this from his groupcache
+project because there's not a light-weight way to depend on it from there w/o
+dragging in all of groupcache.
+
+https://github.com/golang/groupcache
