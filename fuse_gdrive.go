@@ -25,6 +25,7 @@ import (
 
 var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
 var allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
+var debug = flag.Bool("gdrive.debug", true, "print debug statements from the fuse_gdrive package")
 
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
@@ -32,6 +33,12 @@ var account string
 var rootId string
 var rootChildren map[string]*Node
 var childLock sync.RWMutex
+
+func (d debugging) Printf(format string, args ...interface{}) {
+	if d {
+		log.Printf(format, args...)
+	}
+}
 
 var Usage = func() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -50,7 +57,7 @@ func (s FS) Root() (fs.Node, fuse.Error) {
 
 // don't think this does anything?  still don't see async reads  :-/
 func (fs FS) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
-	// fmt.Println("Init flags: %+v", req.Flags.String())
+	debug.Printf("Init flags: %+v", req.Flags.String())
 	resp.MaxWrite = 128 * 1024
 	resp.Flags = fuse.InitBigWrites & fuse.InitAsyncRead
 	return nil
@@ -115,6 +122,7 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
 	if n.DownloadUrl == "" { // If there is no downloadUrl, there is no body
 		return nil
 	}
+	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", n.Title, req.Offset, req.Size)
 	b, err := cache.Read(n.DownloadUrl, req.Offset, int64(req.Size), n.FileSize)
 	if err != nil {
 		return fmt.Errorf("cache.Read (..%v..): %v", req.Offset, err)
@@ -151,8 +159,7 @@ func main() {
 	mountpoint := flag.Arg(0)
 
 	if err := sanityCheck(mountpoint); err != nil {
-		fmt.Printf("sanityCheck failed: %s\n", err)
-		os.Exit(1)
+		log.Fatalf("sanityCheck failed: %s\n", err)
 	}
 
 	http.HandleFunc("/", RootHandler)
