@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,9 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 		if len(*query) > 0 {
 			list = list.Q(*query)
 		}
+
+		// Limit the data we get back from the API to what we use
+		list = list.Fields("nextPageToken", "items(createdDate,downloadUrl,fileSize,id,lastViewedByMeDate,mimeType,modifiedDate,parents/id,title)")
 
 		// If we have a pageToken set, apply it to the query
 		if pageToken != "" {
@@ -88,60 +92,73 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 
 // updateFS polls Google Drive for the list of files, and updates the fuse FS
 func updateFS(service *drive.Service, fs FS) (Node, error) {
-	// TODO: setup a http.Handler to allow forcing a refresh
+	start := make(chan int)
+	go func() { start <- 1 }()
+	// TODO: why doesn't this work?
+	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
+		start <- 1
+		fmt.Fprintf(w, "Refresh request accepted.")
+	})
+	timesUp := time.Tick(*driveRefresh)
+
 	for {
-		fileById, err := getNodes(service)
-		if err != nil {
-			log.Printf("error updating filesystem, getNodes: %s", err)
-			continue
-		}
-		newRootNode, ok := fileById[rootId]
-		if !ok {
-			log.Printf("can not refresh tree: fileById[rootId] for (%v) not found", rootId)
-			continue
-		}
+		select {
+		case <-timesUp:
+			go func() { start <- 1 }()
+		case <-start:
+			fileById, err := getNodes(service)
+			if err != nil {
+				log.Printf("error updating filesystem, getNodes: %s", err)
+				continue
+			}
+			newRootNode, ok := fileById[rootId]
+			if !ok {
+				log.Printf("can not refresh tree: fileById[rootId] for (%v) not found", rootId)
+				continue
+			}
 
-		var missingParents int
-		dupes := make(map[string]*Node)
-		for _, f := range fileById {
-			missingParents = 0
-			for _, pId := range f.Parents {
-				parent, ok := fileById[pId]
-				if !ok {
-					missingParents++
-					continue
+			var missingParents int
+			dupes := make(map[string]*Node)
+			for _, f := range fileById {
+				missingParents = 0
+				for _, pId := range f.Parents {
+					parent, ok := fileById[pId]
+					if !ok {
+						missingParents++
+						continue
+					}
+					if parent.Children == nil {
+						parent.Children = make(map[string]*Node)
+					}
+					if conflict, ok := parent.Children[f.Title]; ok {
+						dupes[f.Title] = parent
+						conflictWithDocid := fmt.Sprintf("%s.%s", conflict.Title, conflict.Id)
+						parent.Children[conflictWithDocid] = conflict
+						fWithDocid := fmt.Sprintf("%s.%s", f.Title, f.Id)
+						parent.Children[fWithDocid] = f
+						debug.Printf("Found conflicting file (%s/%s), added additional dir entries: %s, %s", parent.Title, conflict.Title, conflictWithDocid, fWithDocid)
+					} else {
+						parent.Children[f.Title] = f
+					}
 				}
-				if parent.Children == nil {
-					parent.Children = make(map[string]*Node)
-				}
-				if conflict, ok := parent.Children[f.Title]; ok {
-					dupes[f.Title] = parent
-					conflictWithDocid := fmt.Sprintf("%s.%s", conflict.Title, conflict.Id)
-					parent.Children[conflictWithDocid] = conflict
-					fWithDocid := fmt.Sprintf("%s.%s", f.Title, f.Id)
-					parent.Children[fWithDocid] = f
-					debug.Printf("Found conflicting file (%s/%s), added additional dir entries: %s, %s", parent.Title, conflict.Title, conflictWithDocid, fWithDocid)
-				} else {
-					parent.Children[f.Title] = f
+				if missingParents == len(f.Parents) && !f.isRoot {
+					log.Printf("Could not find any parents for '%s' in %v, placing at root.", f.Title, f.Parents)
+					newRootNode.Children[f.Title] = f
 				}
 			}
-			if missingParents == len(f.Parents) && !f.isRoot {
-				log.Printf("Could not find any parents for '%s' in %v, placing at root.", f.Title, f.Parents)
-				newRootNode.Children[f.Title] = f
+
+			for conflict, parent := range dupes {
+				delete(parent.Children, conflict)
 			}
-		}
 
-		for conflict, parent := range dupes {
-			delete(parent.Children, conflict)
+			log.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
+			childLock.Lock()
+			rootChildren = make(map[string]*Node, len(newRootNode.Children))
+			for _, c := range newRootNode.Children {
+				rootChildren[c.Title] = c
+			}
+			childLock.Unlock()
 		}
-
-		fmt.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
-		childLock.Lock()
-		rootChildren = make(map[string]*Node, len(newRootNode.Children))
-		for _, c := range newRootNode.Children {
-			rootChildren[c.Title] = c
-		}
-		childLock.Unlock()
-		time.Sleep(*driveRefresh)
 	}
+	return Node{}, fmt.Errorf("unexpectedly reached end of updateFS")
 }
