@@ -11,6 +11,7 @@ import (
 )
 
 var driveRefresh = flag.Duration("refresh", 5*time.Minute, "how often to refresh the list of files and directories from Google Drive.")
+var query = flag.String("query", "trashed=false", "Search parameters to pass to Google Drive, which limit the files mounted.  See http://goo.gl/6kSu3E")
 
 // The root of the tree is always one, we increment from there.
 var nextInode uint64 = 1
@@ -20,12 +21,17 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 	var fs []*drive.File
 	pageToken := ""
 	for {
-		q := d.Files.List()
+		list := d.Files.List()
+
+		if len(*query) > 0 {
+			list = list.Q(*query)
+		}
+
 		// If we have a pageToken set, apply it to the query
 		if pageToken != "" {
-			q = q.PageToken(pageToken)
+			list = list.PageToken(pageToken)
 		}
-		r, err := q.Do()
+		r, err := list.Do()
 		if err != nil {
 			return fs, err
 		}
@@ -58,7 +64,6 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 
 	for _, f := range files {
 		var isDir bool
-		// TODO: drop trashed files here, or in the AllFiles query is possible
 		if f.MimeType == driveFolderMimeType {
 			isDir = true
 		}
