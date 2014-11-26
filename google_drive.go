@@ -101,13 +101,14 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 			continue
 		}
 
+		var missingParents int
 		dupes := make(map[string]*Node)
 		for _, f := range fileById {
+			missingParents = 0
 			for _, pId := range f.Parents {
 				parent, ok := fileById[pId]
 				if !ok {
-					log.Printf("parent of %s not found, expected %s", f.Title, pId)
-					newRootNode.Children[f.Title] = f
+					missingParents++
 					continue
 				}
 				if parent.Children == nil {
@@ -123,6 +124,10 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 				} else {
 					parent.Children[f.Title] = f
 				}
+			}
+			if missingParents == len(f.Parents) && !f.isRoot {
+				log.Printf("Could not find any parents for '%s' in %v, placing at root.", f.Title, f.Parents)
+				newRootNode.Children[f.Title] = f
 			}
 		}
 
