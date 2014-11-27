@@ -94,7 +94,6 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 func updateFS(service *drive.Service, fs FS) (Node, error) {
 	start := make(chan int)
 	go func() { start <- 1 }()
-	// TODO: why doesn't this work?
 	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
 		start <- 1
 		fmt.Fprintf(w, "Refresh request accepted.")

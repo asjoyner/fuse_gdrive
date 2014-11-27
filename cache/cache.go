@@ -1,6 +1,8 @@
 // The cache package provides efficient small reads of large remote HTTP files.
 package cache
 
+// TODO: Exponentially increasing read-ahead, up to limit
+
 import (
 	"flag"
 	"fmt"
