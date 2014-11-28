@@ -41,7 +41,6 @@ var gid uint32  // gid of the user who mounted the FS
 var account string   // email address of the mounted google drive account
 var rootId string    // Drive Id of the root of the FS
 var rootChildren map[string]*Node  // children of the root node of the FS
-var childLock sync.RWMutex         // lock for modifying rootChildren
 
 var debug debugging
 
@@ -61,7 +60,7 @@ var Usage = func() {
 
 // FS implements Root() to pass the 'tree' to Fuse
 type FS struct {
-	root Node
+	root *Node
 }
 
 func (s FS) Root() (fs.Node, fuse.Error) {
@@ -79,6 +78,7 @@ func (fs FS) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) 
 // Node represents a file (or folder) in Drive.
 type Node struct {
 	Id          string
+	Mu          sync.Mutex
 	Children    map[string]*Node
 	Parents     []string
 	Inode       uint64
@@ -92,7 +92,7 @@ type Node struct {
 	isRoot      bool // lookups handled differently, because fuse takes a copy of it
 }
 
-func (n Node) Attr() fuse.Attr {
+func (n *Node) Attr() fuse.Attr {
   a := fuse.Attr{Inode: n.Inode,
                  Uid: uid,
                  Gid: gid,
@@ -110,41 +110,30 @@ func (n Node) Attr() fuse.Attr {
 	}
 }
 
-func (n Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
+func (n *Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 	var dirs []fuse.Dirent
-	var childType fuse.DirentType
-	children := n.Children
-	if n.isRoot {
-		childLock.RLock()
-		defer childLock.RUnlock()
-		children = rootChildren
-	}
-	for filename, child := range children {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	for filename, child := range n.Children {
+		childType := fuse.DT_File
 		if child.isDir {
 			childType = fuse.DT_Dir
-		} else {
-			childType = fuse.DT_File
 		}
-		entry := fuse.Dirent{Inode: child.Inode, Name: filename, Type: childType}
-		dirs = append(dirs, entry)
+		dirs = append(dirs, fuse.Dirent{Inode: child.Inode, Name: filename, Type: childType})
 	}
 	return dirs, nil
 }
 
-func (n Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
-	children := n.Children
-	if n.isRoot {
-		childLock.RLock()
-		defer childLock.RUnlock()
-		children = rootChildren
-	}
-	if child, ok := children[name]; ok {
+func (n *Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
+	n.Mu.Lock()
+	defer n.Mu.Unlock()
+	if child, ok := n.Children[name]; ok {
 		return child, nil
 	}
-	return Node{}, fuse.ENOENT
+	return &Node{}, nil
 }
 
-func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr) fuse.Error {
+func (n *Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr) fuse.Error {
 	if n.DownloadUrl == "" { // If there is no downloadUrl, there is no body
 		return nil
 	}
@@ -157,21 +146,21 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
 	return nil
 }
 
-func (n Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error) {
+func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error) {
   // req: Mkdir [ID=0x12 Node=0x1 Uid=13040 Gid=5000 Pid=50632] "test" mode=drwxr-xr-x
   // TODO: if allow_other, require uid == invoking uid to allow writes
   p := []*drive.ParentReference{&drive.ParentReference{Id: n.Id}}
   f := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
   f, err := service.Files.Insert(f).Do()
   if err != nil {
-    return Node{}, fmt.Errorf("Insert failed: %v", err)
+    return &Node{}, fmt.Errorf("Insert failed: %v", err)
   }
   // TODO: update the FS sooner, rather than later
   node, err := nodeFromFile(f)
   if err != nil {
-    return Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)
+    return &Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)
   }
-  return *node, nil
+  return node, nil
 }
 
 func sanityCheck(mountpoint string) error {
@@ -244,7 +233,7 @@ func main() {
 	account = about.User.EmailAddress
 
 	rootNode := rootNode()
-  tree := FS{root: rootNode}
+  tree := FS{root: &rootNode}
 
 	// periodically refresh the FS with the list of files from Drive
 	go updateFS(service, tree)

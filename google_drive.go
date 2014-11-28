@@ -123,9 +123,11 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
     }
 		if len(f.Parents) > 0 {
 			node.Parents = make([]string, len(f.Parents))
-			for i, p := range f.Parents {
-				node.Parents[i] = p.Id
+			for i := range f.Parents {
+				node.Parents[i] = f.Parents[i].Id
 			}
+		} else {
+			node.Parents = []string{rootId}
 		}
 		fileById[f.Id] = node
 	}
@@ -193,12 +195,9 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 			}
 
 			log.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
-			childLock.Lock()
-			rootChildren = make(map[string]*Node, len(newRootNode.Children))
-			for _, c := range newRootNode.Children {
-				rootChildren[c.Title] = c
-			}
-			childLock.Unlock()
+      fs.root.Mu.Lock()
+      fs.root.Children = newRootNode.Children
+      fs.root.Mu.Unlock()
 		}
 	}
 	return Node{}, fmt.Errorf("unexpectedly reached end of updateFS")
