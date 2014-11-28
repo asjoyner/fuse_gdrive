@@ -12,7 +12,10 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"os/user"
+  "strconv"
 	"sync"
+  "time"
 
 	drive "code.google.com/p/google-api-go-client/drive/v2"
 
@@ -24,15 +27,21 @@ import (
 )
 
 var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
+var readOnly = flag.Bool("readonly", false, "Mount the filesystem read only.")
 var allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
 var debugGdrive = flag.Bool("gdrive.debug", true, "print debug statements from the fuse_gdrive package")
 
+var client *http.Client
+var service *drive.Service
+
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
-var account string
-var rootId string
-var rootChildren map[string]*Node
-var childLock sync.RWMutex
+var uid uint32  // uid of the user who mounted the FS
+var gid uint32  // gid of the user who mounted the FS
+var account string   // email address of the mounted google drive account
+var rootId string    // Drive Id of the root of the FS
+var rootChildren map[string]*Node  // children of the root node of the FS
+var childLock sync.RWMutex         // lock for modifying rootChildren
 
 var debug debugging
 
@@ -77,14 +86,27 @@ type Node struct {
 	isDir       bool
 	FileSize    int64
 	DownloadUrl string
+  Atime time.Time
+  Mtime time.Time
+  Ctime time.Time
 	isRoot      bool // lookups handled differently, because fuse takes a copy of it
 }
 
 func (n Node) Attr() fuse.Attr {
+  a := fuse.Attr{Inode: n.Inode,
+                 Uid: uid,
+                 Gid: gid,
+                 Atime: n.Atime,
+                 Mtime: n.Mtime,
+                 Ctime: n.Ctime,
+                }
 	if n.isDir {
-		return fuse.Attr{Inode: n.Inode, Mode: os.ModeDir | 0555}
+    a.Mode = os.ModeDir | 0555
+		return a
 	} else {
-		return fuse.Attr{Inode: n.Inode, Size: uint64(n.FileSize), Mode: 0444}
+    a.Mode = 0444
+    a.Size = uint64(n.FileSize)
+		return a
 	}
 }
 
@@ -135,6 +157,23 @@ func (n Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr)
 	return nil
 }
 
+func (n Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error) {
+  // req: Mkdir [ID=0x12 Node=0x1 Uid=13040 Gid=5000 Pid=50632] "test" mode=drwxr-xr-x
+  // TODO: if allow_other, require uid == invoking uid to allow writes
+  p := []*drive.ParentReference{&drive.ParentReference{Id: n.Id}}
+  f := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
+  f, err := service.Files.Insert(f).Do()
+  if err != nil {
+    return Node{}, fmt.Errorf("Insert failed: %v", err)
+  }
+  // TODO: update the FS sooner, rather than later
+  node, err := nodeFromFile(f)
+  if err != nil {
+    return Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)
+  }
+  return *node, nil
+}
+
 func sanityCheck(mountpoint string) error {
 	fileInfo, err := os.Stat(mountpoint)
 	if os.IsNotExist(err) {
@@ -166,34 +205,46 @@ func main() {
 		debug = true
 	}
 
-	if err := sanityCheck(mountpoint); err != nil {
+  userCurrent, err := user.Current()
+  if err != nil {
+    log.Fatalf("unable to get UID/GID of current user: %v", err)
+  }
+  uidInt, err := strconv.Atoi(userCurrent.Uid)
+  if err != nil {
+    log.Fatalf("unable to get UID/GID of current user: %v", err)
+  }
+  uid = uint32(uidInt)
+  gidInt, err := strconv.Atoi(userCurrent.Gid)
+  if err != nil {
+    log.Fatalf("unable to get UID/GID of current user: %v", err)
+  }
+  gid = uint32(gidInt)
+
+	if err = sanityCheck(mountpoint); err != nil {
 		log.Fatalf("sanityCheck failed: %s\n", err)
 	}
 
 	http.HandleFunc("/", RootHandler)
 	go http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
 
-	client := getOAuthClient(drive.DriveReadonlyScope)
+  if *readOnly {
+    client = getOAuthClient(drive.DriveReadonlyScope)
+  } else {
+    client = getOAuthClient(drive.DriveScope)
+  }
 
 	cache.Configure("/tmp", client)
 
-	service, _ := drive.New(client)
+	service, _ = drive.New(client)
 	about, err := service.About.Get().Do()
 	if err != nil {
-		log.Fatalf("drive.service.About.Get.Do: %v\n", err)
+		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
 	rootId = about.RootFolderId
 	account = about.User.EmailAddress
 
-	// Populate the initial filesystem as a single empty node
-	rootNode := Node{Id: rootId,
-		Children: make(map[string]*Node),
-		Inode:    1, // The root of the tree is always 1
-		Title:    "/",
-		isDir:    true,
-		isRoot:   true,
-	}
-	tree := FS{root: rootNode}
+	rootNode := rootNode()
+  tree := FS{root: rootNode}
 
 	// periodically refresh the FS with the list of files from Drive
 	go updateFS(service, tree)
@@ -212,6 +263,7 @@ func main() {
 		options = append(options, fuse.AllowOther())
 	}
 
+  // TODO: if *readOnly { .. add an option to the fuse library for that
 	c, err := fuse.Mount(mountpoint, options...)
 	if err != nil {
 		log.Fatal(err)

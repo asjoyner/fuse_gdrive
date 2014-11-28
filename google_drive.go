@@ -48,6 +48,61 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 	return fs, nil
 }
 
+// the root node starts out as a single empty node
+func rootNode() Node {
+	return Node{Id: rootId,
+		Children: make(map[string]*Node),
+		Inode:    1, // The root of the tree is always 1
+		Title:    "/",
+		isDir:    true,
+		isRoot:   true,
+    Atime: time.Unix(1335225600, 0),
+    Mtime: time.Unix(1335225600, 0),
+    Ctime: time.Unix(1335225600, 0),
+	}
+}
+
+// TODO: reuse inodes; don't generate a whole new set every getNodes
+func nodeFromFile(f *drive.File) (*Node, error) {
+  var isDir bool
+  if f.MimeType == driveFolderMimeType {
+    isDir = true
+  }
+  /* TODO: Figure out time vs. JSON
+  var atime, ctime, mtime time.Time
+  if err := ctime.UnmarshalJSON(f.CreatedDate); err != nil {
+    return &Node{}, fmt.Errorf("CreatedDate.UnmarshalJSON: %v", err)
+  }
+  if len(cbytes) > 0 {
+    if err := atime.UnmarshalJSON([]byte(f.LastViewedByMeDate)); err != nil {
+      return &Node{}, fmt.Errorf("LastViewedByMeDate.UnmarshalJSON: %v", err)
+    }
+  } else {
+    atime = ctime
+  }
+  if len(cbytes) > 0 {
+    if err := mtime.UnmarshalJSON([]byte(f.ModifiedDate)); err != nil {
+      return &Node{}, fmt.Errorf("ModifiedDate.UnmarshalJSON: %v", err)
+    }
+  } else {
+    mtime = ctime
+  }
+  */
+  node := &Node{Id: f.Id,
+        Inode:       atomic.AddUint64(&nextInode, 1),
+        Title:       f.Title,
+        isDir:       isDir,
+        FileSize:    f.FileSize,
+        DownloadUrl: f.DownloadUrl,
+        /* TODO: Figure out time vs JSON
+        Atime:       atime,
+        Mtime:       mtime,
+        Ctime:       ctime,
+        */
+    }
+  return node, nil
+}
+
 // getNodes returns a map of unique IDs to the Node it describes
 func getNodes(service *drive.Service) (map[string]*Node, error) {
 	files, err := AllFiles(service)
@@ -56,29 +111,16 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 	}
 
 	// synthesize the root of the drive tree
-	rootNode := Node{Children: make(map[string]*Node),
-		Inode:  1, // The root of the tree is always 1
-		Title:  "/",
-		isDir:  true,
-		isRoot: true,
-	}
-
+	rootNode := rootNode()
 	fileById := make(map[string]*Node, len(files))
 	fileById[rootId] = &rootNode
 
 	for _, f := range files {
-		var isDir bool
-		if f.MimeType == driveFolderMimeType {
-			isDir = true
-		}
-		// TODO: reuse inodes; don't generate a whole new set every getNodes
-		node := &Node{Id: f.Id,
-			Inode:       atomic.AddUint64(&nextInode, 1),
-			Title:       f.Title,
-			isDir:       isDir,
-			FileSize:    f.FileSize,
-			DownloadUrl: f.DownloadUrl,
-		}
+		node, err := nodeFromFile(f)
+    if err != nil {
+      log.Printf("Failed to interpret node \"%s\": %v", f.Title, err)
+      continue
+    }
 		if len(f.Parents) > 0 {
 			node.Parents = make([]string, len(f.Parents))
 			for i, p := range f.Parents {
