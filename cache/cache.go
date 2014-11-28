@@ -46,9 +46,9 @@ type DriveCache struct {
 }
 
 type chunk struct {
-	url  string
-	n    int64
-	max  int64
+	url string
+	n   int64
+	max int64
 }
 
 type fetchRequest struct {
@@ -64,7 +64,7 @@ func Fetcher(in chan *fetchRequest) {
 	queue := make(map[chunk]*fetchRequest)
 	for {
 		fr := <-in
-		queueLock.Lock()  // if not found, we need to add it before unlock
+		queueLock.Lock() // if not found, we need to add it before unlock
 		inProgressFr, ok := queue[fr.c]
 		if ok {
 			// fr.find needs to be separate, so we can update fr.fill in place before
