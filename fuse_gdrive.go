@@ -130,7 +130,7 @@ func (n *Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
 	if child, ok := n.Children[name]; ok {
 		return child, nil
 	}
-	return &Node{}, nil
+	return &Node{}, fuse.ENOENT
 }
 
 func (n *Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr) fuse.Error {
