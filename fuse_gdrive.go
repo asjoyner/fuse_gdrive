@@ -160,7 +160,8 @@ func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error)
 	if err != nil {
 		return &Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)
 	}
-	return node, nil
+	n.Children[node.Title] = node
+	return n, nil
 }
 
 func sanityCheck(mountpoint string) error {
