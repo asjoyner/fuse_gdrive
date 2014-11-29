@@ -141,7 +141,7 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 }
 
 // updateFS polls Google Drive for the list of files, and updates the fuse FS
-func updateFS(service *drive.Service, fs FS) (Node, error) {
+func updateFS(service *drive.Service, fs *FS) (Node, error) {
 	peek := make(chan int)
 	start := make(chan int)
 	go func() { peek <- 1 }() // first peek always triggers start
@@ -233,7 +233,7 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 				delete(parent.Children, conflict)
 			}
 
-			log.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
+			debug.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
 			fs.root.Mu.Lock()
 			fs.root.Children = newRootNode.Children
 			debug.Printf("Updating root node to: %+v\n", fs.root)

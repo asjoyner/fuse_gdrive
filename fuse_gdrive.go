@@ -63,12 +63,12 @@ type FS struct {
 	root *Node
 }
 
-func (s FS) Root() (fs.Node, fuse.Error) {
+func (s *FS) Root() (fs.Node, fuse.Error) {
 	return s.root, nil
 }
 
 // don't think this does anything?  still don't see async reads  :-/
-func (fs FS) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
+func (fs *FS) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
 	debug.Printf("Init flags: %+v", req.Flags.String())
 	resp.MaxWrite = 128 * 1024
 	resp.Flags = fuse.InitBigWrites & fuse.InitAsyncRead
@@ -128,6 +128,7 @@ func (n *Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
 	if child, ok := n.Children[name]; ok {
+    debug.Printf("Lookup on %s of %s, returning %p\n", n.Title, name, child)
 		return child, nil
 	}
 	return &Node{}, fuse.ENOENT
@@ -162,6 +163,20 @@ func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error)
 	n.Children[node.Title] = node
 	return n, nil
 }
+
+// TODO: Implement remove (doubles as rmdir)
+/*
+func (n *Node) Remove(req *fuse.RemoveRequest, intr Intr) fuse.Error {
+	// TODO: if allow_other, require uid == invoking uid to allow writes
+}
+*/
+
+// TODO: Implement Write
+/*
+func (n *Node) Write(req *fuse.WriteRequest, resp *fuse.WriteResponse, intr fs.Intr) fuse.Error
+	// TODO: if allow_other, require uid == invoking uid to allow writes
+}
+*/
 
 func sanityCheck(mountpoint string) error {
 	fileInfo, err := os.Stat(mountpoint)
@@ -233,7 +248,7 @@ func main() {
 	account = about.User.EmailAddress
 
 	rootNode := rootNode()
-	tree := FS{root: &rootNode}
+	tree := &FS{root: &rootNode}
 
 	// periodically refresh the FS with the list of files from Drive
 	go updateFS(service, tree)
