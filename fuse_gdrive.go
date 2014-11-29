@@ -89,7 +89,6 @@ type Node struct {
 	Atime       time.Time
 	Mtime       time.Time
 	Ctime       time.Time
-	isRoot      bool // lookups handled differently, because fuse takes a copy of it
 }
 
 func (n *Node) Attr() fuse.Attr {
@@ -111,6 +110,7 @@ func (n *Node) Attr() fuse.Attr {
 }
 
 func (n *Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
+  debug.Printf("ReadDir of %s at %p containing %+v\n", n.Title, n, n)
 	var dirs []fuse.Dirent
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
@@ -155,7 +155,6 @@ func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error)
 	if err != nil {
 		return &Node{}, fmt.Errorf("Insert failed: %v", err)
 	}
-	// TODO: update the FS sooner, rather than later
 	node, err := nodeFromFile(f)
 	if err != nil {
 		return &Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)

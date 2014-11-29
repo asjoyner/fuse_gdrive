@@ -61,7 +61,6 @@ func rootNode() Node {
 		Inode:    1, // The root of the tree is always 1
 		Title:    "/",
 		isDir:    true,
-		isRoot:   true,
 		Atime:    time.Unix(1335225600, 0),
 		Mtime:    time.Unix(1335225600, 0),
 		Ctime:    time.Unix(1335225600, 0),
@@ -118,7 +117,7 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 
 	// synthesize the root of the drive tree
 	rootNode := rootNode()
-	fileById := make(map[string]*Node, len(files))
+	fileById := make(map[string]*Node, len(files)+1)
 	fileById[rootId] = &rootNode
 
 	for _, f := range files {
@@ -133,6 +132,7 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 				node.Parents[i] = f.Parents[i].Id
 			}
 		} else {
+			debug.Printf("%s has no parents, making it accessible at /.", node.Title)
 			node.Parents = []string{rootId}
 		}
 		fileById[f.Id] = node
@@ -167,8 +167,10 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 		select {
 		case <-timeToStart:
 			go func() { start <- 1 }()
+
 		case <-timeToPeek:
 			go func() { peek <- 1 }()
+
 		case <-peek:
 			querystart := time.Now()
 			c, err := l.Do()
@@ -184,6 +186,7 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 			} else {
 				debug.Printf("No updates since last check. (took %dms)", querytime)
 			}
+
 		case <-start:
 			fileById, err := getNodes(service)
 			if err != nil {
@@ -220,7 +223,7 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 						parent.Children[f.Title] = f
 					}
 				}
-				if missingParents == len(f.Parents) && !f.isRoot {
+				if missingParents == len(f.Parents) && f.Id != rootId {
 					log.Printf("Could not find any parents for '%s' in %v, placing at root.", f.Title, f.Parents)
 					newRootNode.Children[f.Title] = f
 				}
@@ -233,6 +236,8 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 			log.Printf("Refreshing fuse filesystem with new view: %d files\n", len(fileById))
 			fs.root.Mu.Lock()
 			fs.root.Children = newRootNode.Children
+			debug.Printf("Updating root node to: %+v\n", fs.root)
+			fs.root.Mtime = time.Now()
 			fs.root.Mu.Unlock()
 		}
 	}
