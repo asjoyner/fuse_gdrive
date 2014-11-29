@@ -14,6 +14,7 @@ import (
 var driveFullRefresh = flag.Duration("forcerefresh", time.Hour, "how often to force a full refresh of the list of files and directories from Google Drive.")
 var driveCheckChanges = flag.Duration("checkchanges", time.Minute, "how often to do a quick check to see if it's necessary to refresh the list of files and directories from Google Drive.")
 var query = flag.String("query", "trashed=false", "Search parameters to pass to Google Drive, which limit the files mounted.  See http://goo.gl/6kSu3E")
+var maxFilesList = flag.Int64("maxfileslist", 1000, "Maximum number of files to query Google Drive for metata at a time.  Range: 1-1000")
 
 // The root of the tree is always one, we increment from there.
 var nextInode uint64 = 1
@@ -24,6 +25,7 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 	pageToken := ""
 	for {
 		list := d.Files.List()
+		list.MaxResults(1000)
 
 		if len(*query) > 0 {
 			list = list.Q(*query)
@@ -36,7 +38,10 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 		if pageToken != "" {
 			list = list.PageToken(pageToken)
 		}
+		querystart := time.Now()
 		r, err := list.Do()
+		querytime := time.Now().Sub(querystart).Nanoseconds() / 1e6
+		debug.Printf("Files.List() of %d items took %dms", len(r.Items), querytime)
 		if err != nil {
 			return fs, err
 		}
@@ -165,7 +170,9 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 		case <-timeToPeek:
 			go func() { peek <- 1 }()
 		case <-peek:
+			querystart := time.Now()
 			c, err := l.Do()
+			querytime := time.Now().Sub(querystart).Nanoseconds() / 1e6
 			if err != nil {
 				log.Printf("failed calling Changes.List(): %v", err)
 				continue
@@ -175,7 +182,7 @@ func updateFS(service *drive.Service, fs FS) (Node, error) {
 				lastLargestID = currentLargestID
 				go func() { start <- 1 }()
 			} else {
-				debug.Printf("No updates since last check.")
+				debug.Printf("No updates since last check. (took %dms)", querytime)
 			}
 		case <-start:
 			fileById, err := getNodes(service)
