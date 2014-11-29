@@ -11,7 +11,8 @@ import (
 	"code.google.com/p/google-api-go-client/drive/v2"
 )
 
-var driveRefresh = flag.Duration("refresh", 5*time.Minute, "how often to refresh the list of files and directories from Google Drive.")
+var driveFullRefresh = flag.Duration("forcerefresh", time.Hour, "how often to force a full refresh of the list of files and directories from Google Drive.")
+var driveCheckChanges = flag.Duration("checkchanges", time.Minute, "how often to do a quick check to see if it's necessary to refresh the list of files and directories from Google Drive.")
 var query = flag.String("query", "trashed=false", "Search parameters to pass to Google Drive, which limit the files mounted.  See http://goo.gl/6kSu3E")
 
 // The root of the tree is always one, we increment from there.
@@ -136,18 +137,46 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 
 // updateFS polls Google Drive for the list of files, and updates the fuse FS
 func updateFS(service *drive.Service, fs FS) (Node, error) {
+	peek := make(chan int)
 	start := make(chan int)
-	go func() { start <- 1 }()
+	go func() { peek <- 1 }() // first peek always triggers start
 	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
 		start <- 1
 		fmt.Fprintf(w, "Refresh request accepted.")
 	})
-	timesUp := time.Tick(*driveRefresh)
+	http.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
+		peek <- 1
+		fmt.Fprintf(w, "Checking Drive for updates since last poll.")
+	})
+	timeToStart := time.Tick(*driveFullRefresh)
+	timeToPeek := time.Tick(*driveCheckChanges)
+
+	// TODO: Investigate also supporting the Watch service, eventually, but it
+	// requires a valid SSL cert, and lots of "registration" hoops:
+	// https://developers.google.com/drive/web/push
+	var currentLargestID, lastLargestID int64
+	l := service.Changes.List()
+	l.IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1)
 
 	for {
 		select {
-		case <-timesUp:
+		case <-timeToStart:
 			go func() { start <- 1 }()
+		case <-timeToPeek:
+			go func() { peek <- 1 }()
+		case <-peek:
+			c, err := l.Do()
+			if err != nil {
+				log.Printf("failed calling Changes.List(): %v", err)
+				continue
+			}
+			currentLargestID = c.LargestChangeId
+			if currentLargestID > lastLargestID {
+				lastLargestID = currentLargestID
+				go func() { start <- 1 }()
+			} else {
+				debug.Printf("No updates since last check.")
+			}
 		case <-start:
 			fileById, err := getNodes(service)
 			if err != nil {
