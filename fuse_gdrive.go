@@ -110,7 +110,7 @@ func (n *Node) Attr() fuse.Attr {
 }
 
 func (n *Node) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
-  debug.Printf("ReadDir of %s at %p containing %+v\n", n.Title, n, n)
+	debug.Printf("ReadDir of %s at %p containing %+v\n", n.Title, n, n)
 	var dirs []fuse.Dirent
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
@@ -128,7 +128,7 @@ func (n *Node) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
 	n.Mu.Lock()
 	defer n.Mu.Unlock()
 	if child, ok := n.Children[name]; ok {
-    debug.Printf("Lookup on %s of %s, returning %p\n", n.Title, name, child)
+		debug.Printf("Lookup on %s of %s, returning %p\n", n.Title, name, child)
 		return child, nil
 	}
 	return &Node{}, fuse.ENOENT

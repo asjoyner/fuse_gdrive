@@ -41,10 +41,11 @@ func AllFiles(d *drive.Service) ([]*drive.File, error) {
 		querystart := time.Now()
 		r, err := list.Do()
 		querytime := time.Now().Sub(querystart).Nanoseconds() / 1e6
-		debug.Printf("Files.List() of %d items took %dms", len(r.Items), querytime)
 		if err != nil {
+			debug.Printf("Files.List() took %dms to fail", querytime)
 			return fs, err
 		}
+		debug.Printf("Files.List() of %d items took %dms", len(r.Items), querytime)
 		fs = append(fs, r.Items...)
 		pageToken = r.NextPageToken
 		if pageToken == "" {
