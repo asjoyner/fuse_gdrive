@@ -33,6 +33,7 @@ var debugGdrive = flag.Bool("gdrive.debug", true, "print debug statements from t
 
 var client *http.Client
 var service *drive.Service
+var driveCache cache.Reader
 
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
@@ -139,9 +140,9 @@ func (n *Node) Read(req *fuse.ReadRequest, resp *fuse.ReadResponse, intr fs.Intr
 		return nil
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", n.Title, req.Offset, req.Size)
-	b, err := cache.Read(n.DownloadUrl, req.Offset, int64(req.Size), n.FileSize)
+	b, err := driveCache.Read(n.DownloadUrl, req.Offset, int64(req.Size), n.FileSize)
 	if err != nil {
-		return fmt.Errorf("cache.Read (..%v..): %v", req.Offset, err)
+		return fmt.Errorf("driveCache.Read (..%v..): %v", req.Offset, err)
 	}
 	resp.Data = b
 	return nil
@@ -237,7 +238,7 @@ func main() {
 		client = getOAuthClient(drive.DriveScope)
 	}
 
-	cache.Configure("/tmp", client)
+	driveCache = cache.NewCache("/tmp", client)
 
 	service, _ = drive.New(client)
 	about, err := service.About.Get().Do()
