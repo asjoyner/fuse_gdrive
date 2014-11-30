@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path"
 	"strconv"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	_ "bazil.org/fuse/fs/fstestutil"
 
 	"github.com/asjoyner/fuse_gdrive/cache"
+	"github.com/asjoyner/fuse_gdrive/drive_db"
 )
 
 var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
@@ -247,6 +249,44 @@ func main() {
 	if err != nil {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
+
+	// Create and start the drive syncer. Note that it's unused for
+	// generating the Fuse view of Google Drive. Integration will
+	// come later.
+	db, err := drive_db.NewDriveDB(service, path.Join("tmp", "gdrive", about.User.EmailAddress))
+	if err != nil {
+		log.Fatalf("could not open leveldb: %v", err)
+	}
+	defer db.Close()
+	db.WaitUntilSynced()
+	log.Printf("synced!")
+
+	// FIXME - test code for reading from the db
+	rids, err := db.RootFileIDs()
+	if err == nil {
+		for _, rid := range rids {
+			rf, err := db.FileByID(rid)
+			if err != nil {
+				log.Printf("could not file: %v %v", rid, err)
+				continue
+			}
+			log.Printf("root file: %v %v", rf.Id, rf.Title)
+			cids, err := db.ChildFileIDs(rf.Id)
+			if err != nil || len(cids) == 0 {
+				log.Printf("no children %v", err)
+				continue
+			}
+			for _, cid := range cids {
+				cf, err := db.FileByID(cid)
+				if err != nil {
+					log.Printf("no kid %v %v", cid, cf)
+					continue
+				}
+				log.Printf("  child: %v %v", cf.Id, cf.Title)
+			}
+		}
+	}
+
 	rootId = about.RootFolderId
 	account = about.User.EmailAddress
 
