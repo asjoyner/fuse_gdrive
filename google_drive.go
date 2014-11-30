@@ -65,46 +65,36 @@ func rootNode() Node {
 		Atime:    time.Unix(1335225600, 0),
 		Mtime:    time.Unix(1335225600, 0),
 		Ctime:    time.Unix(1335225600, 0),
+		Crtime:   time.Unix(1335225600, 0),
 	}
 }
 
+var (
+	startup = time.Now()
+)
 // TODO: reuse inodes; don't generate a whole new set every getNodes
 func nodeFromFile(f *drive.File) (*Node, error) {
 	var isDir bool
 	if f.MimeType == driveFolderMimeType {
 		isDir = true
 	}
-	/* TODO: Figure out time vs. JSON
-	var atime, ctime, mtime time.Time
-	if err := ctime.UnmarshalJSON(f.CreatedDate); err != nil {
-	  return &Node{}, fmt.Errorf("CreatedDate.UnmarshalJSON: %v", err)
-	}
-	if len(cbytes) > 0 {
-	  if err := atime.UnmarshalJSON([]byte(f.LastViewedByMeDate)); err != nil {
-	    return &Node{}, fmt.Errorf("LastViewedByMeDate.UnmarshalJSON: %v", err)
-	  }
-	} else {
-	  atime = ctime
-	}
-	if len(cbytes) > 0 {
-	  if err := mtime.UnmarshalJSON([]byte(f.ModifiedDate)); err != nil {
-	    return &Node{}, fmt.Errorf("ModifiedDate.UnmarshalJSON: %v", err)
-	  }
-	} else {
-	  mtime = ctime
-	}
-	*/
 	node := &Node{Id: f.Id,
 		Inode:       atomic.AddUint64(&nextInode, 1),
 		Title:       f.Title,
 		isDir:       isDir,
 		FileSize:    f.FileSize,
 		DownloadUrl: f.DownloadUrl,
-		/* TODO: Figure out time vs JSON
-		   Atime:       atime,
-		   Mtime:       mtime,
-		   Ctime:       ctime,
-		*/
+	}
+	// Note: on error, the time.Time remains uninitialized; we set it to startup time.
+	if err := node.Atime.UnmarshalText([]byte(f.LastViewedByMeDate)); err != nil {
+		node.Atime = startup
+	}
+	if err := node.Ctime.UnmarshalText([]byte(f.ModifiedDate)); err != nil {
+		node.Ctime = startup
+	}
+	node.Mtime = node.Ctime
+	if err := node.Crtime.UnmarshalText([]byte(f.CreatedDate)); err != nil {
+		node.Crtime = startup
 	}
 	return node, nil
 }

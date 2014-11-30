@@ -90,15 +90,17 @@ type Node struct {
 	Atime       time.Time
 	Mtime       time.Time
 	Ctime       time.Time
+	Crtime      time.Time
 }
 
 func (n *Node) Attr() fuse.Attr {
 	a := fuse.Attr{Inode: n.Inode,
-		Uid:   uid,
-		Gid:   gid,
-		Atime: n.Atime,
-		Mtime: n.Mtime,
-		Ctime: n.Ctime,
+		Uid:    uid,
+		Gid:    gid,
+		Atime:  n.Atime,
+		Mtime:  n.Mtime,
+		Ctime:  n.Ctime,
+		Crtime: n.Crtime,
 	}
 	if n.isDir {
 		a.Mode = os.ModeDir | 0555
