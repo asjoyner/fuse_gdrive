@@ -98,8 +98,8 @@ func (d *DriveDB) ChildFileIDs(fileID string) ([]string, error) {
 	for iter.Next() {
 		pidcid := deKey(string(iter.Key()))
 		cid := pidcid[len(fileID)+1:]
-		ok, _ := d.db.Has(fileKey(cid), nil)
-		if ok {
+		found, err := d.db.Has(fileKey(cid), nil)
+		if err == nil && found {
 			ids = append(ids, cid)
 		} else {
 			batch.Delete(iter.Key())
@@ -255,8 +255,8 @@ func (d *DriveDB) sync() {
 			batch.Put(fkey, buf.Bytes())
 
 			// Check for, and allocate an inode number if needed.
-			ok, _ := d.db.Has(ikey, nil)
-			if ok {
+			found, err := d.db.Has(ikey, nil)
+			if err == nil && found {
 				continue
 			}
 			cpt.LastInode++
