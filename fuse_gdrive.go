@@ -253,7 +253,9 @@ func main() {
 	// Create and start the drive syncer. Note that it's unused for
 	// generating the Fuse view of Google Drive. Integration will
 	// come later.
-	db, err := drive_db.NewDriveDB(service, path.Join("tmp", "gdrive", about.User.EmailAddress))
+	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
+	log.Printf("using drivedb: %v", dbpath)
+	db, err := drive_db.NewDriveDB(service, dbpath)
 	if err != nil {
 		log.Fatalf("could not open leveldb: %v", err)
 	}

@@ -93,13 +93,24 @@ func (d *DriveDB) RootFileIDs() ([]string, error) {
 func (d *DriveDB) ChildFileIDs(fileID string) ([]string, error) {
 	var ids []string
 	d.iters.Add(1)
+	batch := new(leveldb.Batch)
 	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileID)), nil)
 	for iter.Next() {
 		pidcid := deKey(string(iter.Key()))
-		ids = append(ids, pidcid[len(fileID)+1:])
+		cid := pidcid[len(fileID)+1:]
+		ok, _ := d.db.Has(fileKey(cid), nil)
+		if ok {
+			ids = append(ids, cid)
+		} else {
+			batch.Delete(iter.Key())
+		}
 	}
 	iter.Release()
 	d.iters.Done()
+	err := d.db.Write(batch, nil)
+	if err != nil {
+		log.Printf("error writing to db: %v", err)
+	}
 	return ids, iter.Error()
 }
 
@@ -208,15 +219,11 @@ func (d *DriveDB) sync() {
 			continue
 		}
 
-		files := make(map[string]*gdrive.File)
-
 		batch := new(leveldb.Batch)
 
 		for _, i := range c.Items {
 			lastChangeID = i.Id
 			fileId := i.FileId
-			// Stash new files for reference during this sync
-			files[fileId] = i.File
 			fkey := fileKey(fileId)
 			ikey := inodeKey(fileId)
 			ckey := childKey(fileId)
