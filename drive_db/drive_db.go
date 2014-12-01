@@ -199,6 +199,7 @@ func (d *DriveDB) sync() {
 	}
 
 	for {
+		log.Printf("sync loop")
 		c, err := l.Do()
 		if err != nil {
 			log.Printf("sync error: %v", err)
@@ -305,17 +306,17 @@ func (d *DriveDB) sync() {
 			continue
 		}
 
+		// Signal we're synced, if we are.
+		if cpt.LastChangeID >= c.LargestChangeId {
+			d.synced.Broadcast()
+			d.pollSleep()
+		}
+
 		// Start at the new change ID next time
 		l = d.service.Changes.List().
 			IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000).
 			StartChangeId(cpt.LastChangeID + 1)
 
-		// Signal we're synced, if we are.
-		if cpt.LastChangeID >= c.LargestChangeId {
-			d.synced.Broadcast()
-		}
-
-		d.pollSleep()
 	}
 }
 
