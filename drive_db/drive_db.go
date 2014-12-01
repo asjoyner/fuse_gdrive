@@ -61,8 +61,8 @@ type CheckPoint struct {
 	LastInode    int64
 }
 
-// AllFileIDs returns the IDs of all Google Drive file objects currently stored.
-func (d *DriveDB) AllFileIDs() ([]string, error) {
+// AllFileIds returns the IDs of all Google Drive file objects currently stored.
+func (d *DriveDB) AllFileIds() ([]string, error) {
 	var ids []string
 	// We can't Close() until all iterators are released.
 	// TODO: this can still be racy with Close(), fix that.
@@ -76,8 +76,8 @@ func (d *DriveDB) AllFileIDs() ([]string, error) {
 	return ids, iter.Error()
 }
 
-// RootFileIDs returns the IDs of all Google Drive file objects at the root.
-func (d *DriveDB) RootFileIDs() ([]string, error) {
+// RootFileIds returns the IDs of all Google Drive file objects at the root.
+func (d *DriveDB) RootFileIds() ([]string, error) {
 	var ids []string
 	d.iters.Add(1)
 	iter := d.db.NewIterator(util.BytesPrefix(rootKey("")), nil)
@@ -89,15 +89,15 @@ func (d *DriveDB) RootFileIDs() ([]string, error) {
 	return ids, iter.Error()
 }
 
-// ChildFileIDs returns the IDs of all Files that have parent refs to the given file.
-func (d *DriveDB) ChildFileIDs(fileID string) ([]string, error) {
+// ChildFileIds returns the IDs of all Files that have parent refs to the given file.
+func (d *DriveDB) ChildFileIds(fileId string) ([]string, error) {
 	var ids []string
 	d.iters.Add(1)
 	batch := new(leveldb.Batch)
-	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileID)), nil)
+	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileId)), nil)
 	for iter.Next() {
 		pidcid := deKey(string(iter.Key()))
-		cid := pidcid[len(fileID)+1:]
+		cid := pidcid[len(fileId)+1:]
 		found, err := d.db.Has(fileKey(cid), nil)
 		if err == nil && found {
 			ids = append(ids, cid)
@@ -107,17 +107,19 @@ func (d *DriveDB) ChildFileIDs(fileID string) ([]string, error) {
 	}
 	iter.Release()
 	d.iters.Done()
-	err := d.db.Write(batch, nil)
-	if err != nil {
-		log.Printf("error writing to db: %v", err)
+	if batch.Len() > 0 {
+		err := d.db.Write(batch, nil)
+		if err != nil {
+			log.Printf("error writing to db: %v", err)
+		}
 	}
 	return ids, iter.Error()
 }
 
-// FileByID returns a File, given its ID.
-func (d *DriveDB) FileByID(fileID string) (*gdrive.File, error) {
+// FileById returns a File, given its ID.
+func (d *DriveDB) FileById(fileId string) (*gdrive.File, error) {
 	var res gdrive.File
-	err := d.get(fileKey(fileID), &res)
+	err := d.get(fileKey(fileId), &res)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +127,9 @@ func (d *DriveDB) FileByID(fileID string) (*gdrive.File, error) {
 }
 
 // InodeByID returns a File's inode number, given its ID.
-func (d *DriveDB) InodeByID(fileID string) (int64, error) {
+func (d *DriveDB) InodeByID(fileId string) (int64, error) {
 	var inode int64
-	ik := inodeKey(fileID)
+	ik := inodeKey(fileId)
 	err := d.get(ik, &inode)
 	if err != nil {
 		return -1, err
@@ -243,6 +245,13 @@ func (d *DriveDB) sync() {
 				}
 				iter.Release()
 				d.iters.Done()
+				// and delete any parents' refs to it.
+				f, err := d.FileById(fileId)
+				if err == nil && f != nil {
+					for _, pr := range f.Parents {
+						batch.Delete(childKey(pr.Id+":"+fileId))
+					}
+				}
 				continue
 			}
 

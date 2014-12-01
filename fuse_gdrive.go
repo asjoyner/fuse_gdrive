@@ -264,22 +264,22 @@ func main() {
 	log.Printf("synced!")
 
 	// FIXME - test code for reading from the db
-	rids, err := db.RootFileIDs()
+	rids, err := db.RootFileIds()
 	if err == nil {
 		for _, rid := range rids {
-			rf, err := db.FileByID(rid)
+			rf, err := db.FileById(rid)
 			if err != nil {
 				log.Printf("could not file: %v %v", rid, err)
 				continue
 			}
 			log.Printf("root file: %v %v", rf.Id, rf.Title)
-			cids, err := db.ChildFileIDs(rf.Id)
+			cids, err := db.ChildFileIds(rf.Id)
 			if err != nil || len(cids) == 0 {
 				log.Printf("no children %v", err)
 				continue
 			}
 			for _, cid := range cids {
-				cf, err := db.FileByID(cid)
+				cf, err := db.FileById(cid)
 				if err != nil {
 					log.Printf("no kid %v %v", cid, cf)
 					continue
