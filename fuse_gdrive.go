@@ -40,7 +40,6 @@ var service *drive.Service
 var driveCache cache.Reader
 var startup = time.Now()
 
-
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
 var uid uint32                    // uid of the user who mounted the FS
@@ -68,28 +67,29 @@ var Usage = func() {
 // FuseServe receives and dispatches Requests from the kernel
 func FuseServe(c *fuse.Conn, db *drive_db.DriveDB) error {
 	sc := serveConn{db: db,
-			handler: make(map[fuse.HandleID]*drive.File),
-			launch: time.Unix(1335225600, 0),
+		handler: make(map[fuse.HandleID]*drive.File),
+		launch:  time.Unix(1335225600, 0),
+	}
+	for {
+		req, err := c.ReadRequest()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
 		}
-  for {
-    req, err := c.ReadRequest()
-    if err != nil {
-      if err == io.EOF {
-        break
-      }
-      return err
-    }
 
-    go sc.serve(req)
-  }
-  return nil
+		fuse.Debug(fmt.Sprintf("%+v", req))
+		go sc.serve(req)
+	}
+	return nil
 
 }
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
 	sync.Mutex
-	db		  *drive_db.DriveDB
+	db      *drive_db.DriveDB
 	handler map[fuse.HandleID]*drive.File
 	launch  time.Time
 }
@@ -104,7 +104,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	case *fuse.InitRequest:
 		resp := fuse.InitResponse{MaxWrite: 128 * 1024,
-				Flags: fuse.InitBigWrites & fuse.InitAsyncRead,
+			Flags: fuse.InitBigWrites & fuse.InitAsyncRead,
 		}
 		req.Respond(&resp)
 
@@ -117,14 +117,14 @@ func (sc *serveConn) serve(req fuse.Request) {
 		resp.AttrValid = *driveMetadataLatency
 		var attr fuse.Attr
 		if inode == 1 {
-			attr.Inode  = 1
-			attr.Mode   =	os.ModeDir | 0755
-			attr.Atime  = sc.launch
-			attr.Mtime  = sc.launch
-			attr.Ctime  = sc.launch
+			attr.Inode = 1
+			attr.Mode = os.ModeDir | 0755
+			attr.Atime = sc.launch
+			attr.Mtime = sc.launch
+			attr.Ctime = sc.launch
 			attr.Crtime = sc.launch
-			attr.Uid    = uid
-			attr.Gid    = gid
+			attr.Uid = uid
+			attr.Gid = gid
 		} else {
 			id, err := sc.db.FileIdByInode(inode)
 			if err != nil {
@@ -138,22 +138,21 @@ func (sc *serveConn) serve(req fuse.Request) {
 				req.RespondError(fuse.EIO)
 				break
 			}
-			attr.Inode  = inode
-			attr.Atime  = sc.launch
-			attr.Mtime  = sc.launch
-			attr.Ctime  = sc.launch
+			attr.Inode = inode
+			attr.Atime = sc.launch
+			attr.Mtime = sc.launch
+			attr.Ctime = sc.launch
 			attr.Crtime = sc.launch
-			attr.Uid    = uid
-			attr.Gid    = gid
+			attr.Uid = uid
+			attr.Gid = gid
 			if f.MimeType == driveFolderMimeType {
-				attr.Mode   =	0755
+				attr.Mode = 0755
 			}
 		}
 		resp.Attr = attr
 		req.Respond(resp)
 
 	case *fuse.LookupRequest:
-		fuse.Debug(fmt.Sprintf("%+v", req))
 		inode := uint64(req.Header.Node)
 		resp := &fuse.LookupResponse{}
 		var childFileIds []string
@@ -194,18 +193,17 @@ func (sc *serveConn) serve(req fuse.Request) {
 					req.RespondError(fuse.EIO)
 					break
 				}
-				resp.Node       = fuse.NodeID(inode)
+				resp.Node = fuse.NodeID(inode)
 				resp.Generation = 0
 				resp.EntryValid = *driveMetadataLatency
-				resp.AttrValid  = *driveMetadataLatency
-				resp.Attr       = AttrFromFile(cf, inode)
+				resp.AttrValid = *driveMetadataLatency
+				resp.Attr = AttrFromFile(cf, inode)
 				fmt.Printf("%+v\n", resp)
 				req.Respond(resp)
 				break
 			}
 		}
 		req.RespondError(fuse.ENOENT)
-
 
 	}
 }
@@ -232,7 +230,7 @@ func AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
 		Mode:   0755,
 	}
 	if file.MimeType == driveFolderMimeType {
-		attr.Mode   =	os.ModeDir | 0755
+		attr.Mode = os.ModeDir | 0755
 	}
 	return attr
 }
@@ -469,7 +467,7 @@ func main() {
 
 	err = FuseServe(c, db)
 	if err != nil {
-    log.Fatalln("fuse server failed: ", err)
+		log.Fatalln("fuse server failed: ", err)
 	}
 
 	// check if the mount process has an error to report
