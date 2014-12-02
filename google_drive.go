@@ -8,52 +8,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/asjoyner/fuse_gdrive/drive_db"
+
 	"code.google.com/p/google-api-go-client/drive/v2"
 )
 
-var driveFullRefresh = flag.Duration("forcerefresh", time.Hour, "how often to force a full refresh of the list of files and directories from Google Drive.")
-var driveCheckChanges = flag.Duration("checkchanges", time.Minute, "how often to do a quick check to see if it's necessary to refresh the list of files and directories from Google Drive.")
+var driveCacheRead = flag.Duration("forcerefresh", time.Minute, "how often to force a full refresh of the list of files and directories from the metadata cache.")
 var query = flag.String("query", "trashed=false", "Search parameters to pass to Google Drive, which limit the files mounted.  See http://goo.gl/6kSu3E")
 var maxFilesList = flag.Int64("maxfileslist", 1000, "Maximum number of files to query Google Drive for metata at a time.  Range: 1-1000")
 
 // The root of the tree is always one, we increment from there.
 var nextInode uint64 = 1
-
-// AllFiles fetches and returns all files in Google Drive
-func AllFiles(d *drive.Service) ([]*drive.File, error) {
-	var fs []*drive.File
-	pageToken := ""
-	for {
-		list := d.Files.List()
-		list.MaxResults(1000)
-
-		if len(*query) > 0 {
-			list = list.Q(*query)
-		}
-
-		// Limit the data we get back from the API to what we use
-		list = list.Fields("nextPageToken", "items(createdDate,downloadUrl,fileSize,id,lastViewedByMeDate,mimeType,modifiedDate,parents/id,title)")
-
-		// If we have a pageToken set, apply it to the query
-		if pageToken != "" {
-			list = list.PageToken(pageToken)
-		}
-		querystart := time.Now()
-		r, err := list.Do()
-		querytime := time.Now().Sub(querystart).Nanoseconds() / 1e6
-		if err != nil {
-			debug.Printf("Files.List() took %dms to fail", querytime)
-			return fs, err
-		}
-		debug.Printf("Files.List() of %d items took %dms", len(r.Items), querytime)
-		fs = append(fs, r.Items...)
-		pageToken = r.NextPageToken
-		if pageToken == "" {
-			break
-		}
-	}
-	return fs, nil
-}
 
 // the root node starts out as a single empty node
 func rootNode() Node {
@@ -72,6 +37,7 @@ func rootNode() Node {
 var (
 	startup = time.Now()
 )
+
 // TODO: reuse inodes; don't generate a whole new set every getNodes
 func nodeFromFile(f *drive.File) (*Node, error) {
 	var isDir bool
@@ -100,10 +66,19 @@ func nodeFromFile(f *drive.File) (*Node, error) {
 }
 
 // getNodes returns a map of unique IDs to the Node it describes
-func getNodes(service *drive.Service) (map[string]*Node, error) {
-	files, err := AllFiles(service)
+func getNodes(db *drive_db.DriveDB) (map[string]*Node, error) {
+	ids, err := db.AllFileIds()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list files in drive: %v", err)
+		return nil, fmt.Errorf("failed to get ids from cache: %v", err)
+	}
+
+	var files []*drive.File
+	for _, id := range ids {
+		f, err := db.FileById(id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get id %s from cache: %v", id, err)
+		}
+		files = append(files, f)
 	}
 
 	// synthesize the root of the drive tree
@@ -118,7 +93,9 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 			continue
 		}
 		if len(f.Parents) > 0 {
-			node.Parents = make([]string, len(f.Parents))
+			if node.Parents == nil {
+				node.Parents = make([]string, len(f.Parents))
+			}
 			for i := range f.Parents {
 				node.Parents[i] = f.Parents[i].Id
 			}
@@ -131,55 +108,23 @@ func getNodes(service *drive.Service) (map[string]*Node, error) {
 	return fileById, nil
 }
 
-// updateFS polls Google Drive for the list of files, and updates the fuse FS
-func updateFS(service *drive.Service, fs *FS) (Node, error) {
-	peek := make(chan int)
+// updateFS polls the Changes cache for the list of files, and updates the fuse FS
+func updateFS(db *drive_db.DriveDB, fs *FS) (Node, error) {
 	start := make(chan int)
-	go func() { peek <- 1 }() // first peek always triggers start
+	go func() { start <- 1 }()
 	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
 		start <- 1
 		fmt.Fprintf(w, "Refresh request accepted.")
 	})
-	http.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
-		peek <- 1
-		fmt.Fprintf(w, "Checking Drive for updates since last poll.")
-	})
-	timeToStart := time.Tick(*driveFullRefresh)
-	timeToPeek := time.Tick(*driveCheckChanges)
-
-	// TODO: Investigate also supporting the Watch service, eventually, but it
-	// requires a valid SSL cert, and lots of "registration" hoops:
-	// https://developers.google.com/drive/web/push
-	var currentLargestID, lastLargestID int64
-	l := service.Changes.List()
-	l.IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1)
+	timeToStart := time.Tick(*driveCacheRead)
 
 	for {
 		select {
 		case <-timeToStart:
 			go func() { start <- 1 }()
 
-		case <-timeToPeek:
-			go func() { peek <- 1 }()
-
-		case <-peek:
-			querystart := time.Now()
-			c, err := l.Do()
-			querytime := time.Now().Sub(querystart).Nanoseconds() / 1e6
-			if err != nil {
-				log.Printf("failed calling Changes.List(): %v", err)
-				continue
-			}
-			currentLargestID = c.LargestChangeId
-			if currentLargestID > lastLargestID {
-				lastLargestID = currentLargestID
-				go func() { start <- 1 }()
-			} else {
-				debug.Printf("No updates since last check. (took %dms)", querytime)
-			}
-
 		case <-start:
-			fileById, err := getNodes(service)
+			fileById, err := getNodes(db)
 			if err != nil {
 				log.Printf("error updating filesystem, getNodes: %s", err)
 				continue

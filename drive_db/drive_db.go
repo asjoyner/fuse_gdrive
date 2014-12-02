@@ -249,7 +249,7 @@ func (d *DriveDB) sync() {
 				f, err := d.FileById(fileId)
 				if err == nil && f != nil {
 					for _, pr := range f.Parents {
-						batch.Delete(childKey(pr.Id+":"+fileId))
+						batch.Delete(childKey(pr.Id + ":" + fileId))
 					}
 				}
 				continue

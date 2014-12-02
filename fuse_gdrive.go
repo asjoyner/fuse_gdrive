@@ -250,9 +250,7 @@ func main() {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
 
-	// Create and start the drive syncer. Note that it's unused for
-	// generating the Fuse view of Google Drive. Integration will
-	// come later.
+	// Create and start the drive syncer.
 	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
 	log.Printf("using drivedb: %v", dbpath)
 	db, err := drive_db.NewDriveDB(service, dbpath)
@@ -263,32 +261,6 @@ func main() {
 	db.WaitUntilSynced()
 	log.Printf("synced!")
 
-	// FIXME - test code for reading from the db
-	rids, err := db.RootFileIds()
-	if err == nil {
-		for _, rid := range rids {
-			rf, err := db.FileById(rid)
-			if err != nil {
-				log.Printf("could not file: %v %v", rid, err)
-				continue
-			}
-			log.Printf("root file: %v %v", rf.Id, rf.Title)
-			cids, err := db.ChildFileIds(rf.Id)
-			if err != nil || len(cids) == 0 {
-				log.Printf("no children %v", err)
-				continue
-			}
-			for _, cid := range cids {
-				cf, err := db.FileById(cid)
-				if err != nil {
-					log.Printf("no kid %v %v", cid, cf)
-					continue
-				}
-				log.Printf("  child: %v %v", cf.Id, cf.Title)
-			}
-		}
-	}
-
 	rootId = about.RootFolderId
 	account = about.User.EmailAddress
 
@@ -296,7 +268,7 @@ func main() {
 	tree := &FS{root: &rootNode}
 
 	// periodically refresh the FS with the list of files from Drive
-	go updateFS(service, tree)
+	go updateFS(db, tree)
 
 	//http.Handle("/files", FilesPage{files})
 	//http.Handle("/tree", TreePage{tree})
