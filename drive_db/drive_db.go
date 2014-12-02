@@ -5,6 +5,7 @@ package drive_db
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -126,15 +127,26 @@ func (d *DriveDB) FileById(fileId string) (*gdrive.File, error) {
 	return &res, nil
 }
 
-// InodeByID returns a File's inode number, given its ID.
-func (d *DriveDB) InodeByID(fileId string) (uint64, error) {
+// InodeByFileId returns a File's inode number, given its ID.
+func (d *DriveDB) InodeByFileId(fileId string) (uint64, error) {
 	var inode uint64
-	ik := inodeKey(fileId)
-	err := d.get(ik, &inode)
+	f2ik := fileIdToInodeKey(fileId)
+	err := d.get(f2ik, &inode)
 	if err != nil {
 		return 0, err
 	}
 	return inode, nil
+}
+
+// FileIdByInode returns the FileId associated with a given inode.
+func (d *DriveDB) FileIdByInode(inode uint64) (string, error) {
+	var fileId string
+	f2ik := inodeToFileIdKey(inode)
+	err := d.get(f2ik, &fileId)
+	if err != nil {
+		return "", err
+	}
+	return fileId, nil
 }
 
 func (d *DriveDB) get(key []byte, item interface{}) error {
@@ -151,8 +163,12 @@ func internalKey(key string) []byte {
 	return []byte("int:" + key)
 }
 
-func inodeKey(key string) []byte {
-	return []byte("ind:" + key)
+func fileIdToInodeKey(key string) []byte {
+	return []byte("f2i:" + key)
+}
+
+func inodeToFileIdKey(key uint64) []byte {
+	return []byte("i2f:" + fmt.Sprintf("%d", key))
 }
 
 func fileKey(key string) []byte {
@@ -229,13 +245,13 @@ func (d *DriveDB) sync() {
 			lastChangeID = i.Id
 			fileId := i.FileId
 			fkey := fileKey(fileId)
-			ikey := inodeKey(fileId)
+			f2inodekey := fileIdToInodeKey(fileId)
 			ckey := childKey(fileId)
 
 			// Delete file
 			if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
 				batch.Delete(fkey)
-				batch.Delete(ikey)
+				batch.Delete(f2inodekey)
 				// delete any "root object" ref
 				batch.Delete(rootKey(fileId))
 				// also delete all of its child refs
@@ -266,7 +282,7 @@ func (d *DriveDB) sync() {
 			batch.Put(fkey, buf.Bytes())
 
 			// Check for, and allocate an inode number if needed.
-			found, err := d.db.Has(ikey, nil)
+			found, err := d.db.Has(f2inodekey, nil)
 			if err == nil && found {
 				continue
 			}
@@ -277,7 +293,9 @@ func (d *DriveDB) sync() {
 				log.Printf("error encoding inode %v for %v: %v", cpt.LastInode, fileId, err)
 				continue
 			}
-			batch.Put(ikey, buf.Bytes())
+			batch.Put(f2inodekey, buf.Bytes())
+			// Store the opposite lookup of inode -> fileid
+			batch.Put(inodeToFileIdKey(cpt.LastInode), []byte(fileId))
 
 			// Child references
 			for _, pr := range i.File.Parents {

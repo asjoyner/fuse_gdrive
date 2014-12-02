@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -32,10 +33,13 @@ var port = flag.String("port", "12345", "HTTP Server port; your browser will sen
 var readOnly = flag.Bool("readonly", false, "Mount the filesystem read only.")
 var allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
 var debugGdrive = flag.Bool("gdrive.debug", true, "print debug statements from the fuse_gdrive package")
+var driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
 
 var client *http.Client
 var service *drive.Service
 var driveCache cache.Reader
+var startup = time.Now()
+
 
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
@@ -61,6 +65,178 @@ var Usage = func() {
 	flag.PrintDefaults()
 }
 
+// FuseServe receives and dispatches Requests from the kernel
+func FuseServe(c *fuse.Conn, db *drive_db.DriveDB) error {
+	sc := serveConn{db: db,
+			handler: make(map[fuse.HandleID]*drive.File),
+			launch: time.Unix(1335225600, 0),
+		}
+  for {
+    req, err := c.ReadRequest()
+    if err != nil {
+      if err == io.EOF {
+        break
+      }
+      return err
+    }
+
+    go sc.serve(req)
+  }
+  return nil
+
+}
+
+// serveConn holds the state about the fuse connection
+type serveConn struct {
+	sync.Mutex
+	db		  *drive_db.DriveDB
+	handler map[fuse.HandleID]*drive.File
+	launch  time.Time
+}
+
+func (sc *serveConn) serve(req fuse.Request) {
+	switch req := req.(type) {
+	default:
+		// ENOSYS means "this server never implements this request."
+		//done(fuse.ENOSYS)
+		fuse.Debug(fmt.Sprintf("ENOSYS: %+v", req))
+		req.RespondError(fuse.ENOSYS)
+
+	case *fuse.InitRequest:
+		resp := fuse.InitResponse{MaxWrite: 128 * 1024,
+				Flags: fuse.InitBigWrites & fuse.InitAsyncRead,
+		}
+		req.Respond(&resp)
+
+	case *fuse.StatfsRequest:
+		req.Respond(&fuse.StatfsResponse{})
+
+	case *fuse.GetattrRequest:
+		inode := uint64(req.Header.Node)
+		resp := &fuse.GetattrResponse{}
+		resp.AttrValid = *driveMetadataLatency
+		var attr fuse.Attr
+		if inode == 1 {
+			attr.Inode  = 1
+			attr.Mode   =	os.ModeDir | 0755
+			attr.Atime  = sc.launch
+			attr.Mtime  = sc.launch
+			attr.Ctime  = sc.launch
+			attr.Crtime = sc.launch
+			attr.Uid    = uid
+			attr.Gid    = gid
+		} else {
+			id, err := sc.db.FileIdByInode(inode)
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
+				req.RespondError(fuse.ENOENT)
+				break
+			}
+			f, err := sc.db.FileById(id)
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("file lookup failure: %v", err))
+				req.RespondError(fuse.EIO)
+				break
+			}
+			attr.Inode  = inode
+			attr.Atime  = sc.launch
+			attr.Mtime  = sc.launch
+			attr.Ctime  = sc.launch
+			attr.Crtime = sc.launch
+			attr.Uid    = uid
+			attr.Gid    = gid
+			if f.MimeType == driveFolderMimeType {
+				attr.Mode   =	0755
+			}
+		}
+		resp.Attr = attr
+		req.Respond(resp)
+
+	case *fuse.LookupRequest:
+		fuse.Debug(fmt.Sprintf("%+v", req))
+		inode := uint64(req.Header.Node)
+		resp := &fuse.LookupResponse{}
+		var childFileIds []string
+		var err error
+		if inode == 1 {
+			childFileIds, err = sc.db.RootFileIds()
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
+				req.RespondError(fuse.ENOENT)
+				break
+			}
+		} else {
+			fileId, err := sc.db.FileIdByInode(inode)
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
+				req.RespondError(fuse.ENOENT)
+				break
+			}
+			childFileIds, err = sc.db.ChildFileIds(fileId)
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("child id lookup failure: %v", err))
+				req.RespondError(fuse.ENOENT)
+				break
+			}
+		}
+
+		for _, childId := range childFileIds {
+			cf, err := sc.db.FileById(childId)
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("child lookup failure: %v", err))
+				req.RespondError(fuse.EIO)
+				break
+			}
+			if cf.Title == req.Name {
+				inode, err := sc.db.InodeByFileId(childId)
+				if err != nil {
+					fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
+					req.RespondError(fuse.EIO)
+					break
+				}
+				resp.Node       = fuse.NodeID(inode)
+				resp.Generation = 0
+				resp.EntryValid = *driveMetadataLatency
+				resp.AttrValid  = *driveMetadataLatency
+				resp.Attr       = AttrFromFile(cf, inode)
+				fmt.Printf("%+v\n", resp)
+				req.Respond(resp)
+				break
+			}
+		}
+		req.RespondError(fuse.ENOENT)
+
+
+	}
+}
+
+func AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
+	var atime, mtime, crtime time.Time
+	if err := atime.UnmarshalText([]byte(file.LastViewedByMeDate)); err != nil {
+		atime = startup
+	}
+	if err := mtime.UnmarshalText([]byte(file.ModifiedDate)); err != nil {
+		mtime = startup
+	}
+	if err := crtime.UnmarshalText([]byte(file.CreatedDate)); err != nil {
+		crtime = startup
+	}
+	attr := fuse.Attr{
+		Inode:  inode,
+		Atime:  atime,
+		Mtime:  mtime,
+		Ctime:  mtime,
+		Crtime: crtime,
+		Uid:    uid,
+		Gid:    gid,
+		Mode:   0755,
+	}
+	if file.MimeType == driveFolderMimeType {
+		attr.Mode   =	os.ModeDir | 0755
+	}
+	return attr
+}
+
 // FS implements Root() to pass the 'tree' to Fuse
 type FS struct {
 	root *Node
@@ -71,7 +247,7 @@ func (s *FS) Root() (fs.Node, fuse.Error) {
 }
 
 // don't think this does anything?  still don't see async reads  :-/
-func (fs *FS) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
+func (s *serveConn) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
 	debug.Printf("Init flags: %+v", req.Flags.String())
 	resp.MaxWrite = 128 * 1024
 	resp.Flags = fuse.InitBigWrites & fuse.InitAsyncRead
@@ -264,15 +440,6 @@ func main() {
 	rootId = about.RootFolderId
 	account = about.User.EmailAddress
 
-	rootNode := rootNode()
-	tree := &FS{root: &rootNode}
-
-	// periodically refresh the FS with the list of files from Drive
-	go updateFS(db, tree)
-
-	//http.Handle("/files", FilesPage{files})
-	//http.Handle("/tree", TreePage{tree})
-
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),
 		fuse.Subtype("gdrive"),
@@ -300,9 +467,9 @@ func main() {
 		}
 	}()
 
-	err = fs.Serve(c, tree)
+	err = FuseServe(c, db)
 	if err != nil {
-		log.Fatal(err)
+    log.Fatalln("fuse server failed: ", err)
 	}
 
 	// check if the mount process has an error to report

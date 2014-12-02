@@ -30,10 +30,6 @@ func rootNode() Node {
 	}
 }
 
-var (
-	startup = time.Now()
-)
-
 func nodeFromFile(f *drive.File, inode uint64) (*Node, error) {
 	var isDir bool
 	if f.MimeType == driveFolderMimeType {
@@ -82,7 +78,7 @@ func getNodes(db *drive_db.DriveDB) (map[string]*Node, error) {
 	fileById[rootId] = &rootNode
 
 	for _, f := range files {
-		inode, err := db.InodeByID(f.Id)
+		inode, err := db.InodeByFileId(f.Id)
 		if err != nil {
 			log.Printf("failed to lookup inode for %s: %v", f.Id, err)
 			continue
