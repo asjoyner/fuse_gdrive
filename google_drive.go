@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"github.com/asjoyner/fuse_gdrive/drive_db"
@@ -16,9 +15,6 @@ import (
 var driveCacheRead = flag.Duration("forcerefresh", time.Minute, "how often to force a full refresh of the list of files and directories from the metadata cache.")
 var query = flag.String("query", "trashed=false", "Search parameters to pass to Google Drive, which limit the files mounted.  See http://goo.gl/6kSu3E")
 var maxFilesList = flag.Int64("maxfileslist", 1000, "Maximum number of files to query Google Drive for metata at a time.  Range: 1-1000")
-
-// The root of the tree is always one, we increment from there.
-var nextInode uint64 = 1
 
 // the root node starts out as a single empty node
 func rootNode() Node {
@@ -38,14 +34,13 @@ var (
 	startup = time.Now()
 )
 
-// TODO: reuse inodes; don't generate a whole new set every getNodes
-func nodeFromFile(f *drive.File) (*Node, error) {
+func nodeFromFile(f *drive.File, inode uint64) (*Node, error) {
 	var isDir bool
 	if f.MimeType == driveFolderMimeType {
 		isDir = true
 	}
 	node := &Node{Id: f.Id,
-		Inode:       atomic.AddUint64(&nextInode, 1),
+		Inode:       inode,
 		Title:       f.Title,
 		isDir:       isDir,
 		FileSize:    f.FileSize,
@@ -87,9 +82,14 @@ func getNodes(db *drive_db.DriveDB) (map[string]*Node, error) {
 	fileById[rootId] = &rootNode
 
 	for _, f := range files {
-		node, err := nodeFromFile(f)
+		inode, err := db.InodeByID(f.Id)
 		if err != nil {
-			log.Printf("Failed to interpret node \"%s\": %v", f.Title, err)
+			log.Printf("failed to lookup inode for %s: %v", f.Id, err)
+			continue
+		}
+		node, err := nodeFromFile(f, inode)
+		if err != nil {
+			log.Printf("failed to interpret node %s: %v", f.Id, err)
 			continue
 		}
 		if len(f.Parents) > 0 {

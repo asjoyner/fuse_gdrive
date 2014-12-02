@@ -161,7 +161,7 @@ func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error)
 	if err != nil {
 		return &Node{}, fmt.Errorf("Insert failed: %v", err)
 	}
-	node, err := nodeFromFile(f)
+	node, err := nodeFromFile(f, 0)
 	if err != nil {
 		return &Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)
 	}

@@ -58,7 +58,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string) (*DriveDB, error) {
 
 type CheckPoint struct {
 	LastChangeID int64
-	LastInode    int64
+	LastInode    uint64
 }
 
 // AllFileIds returns the IDs of all Google Drive file objects currently stored.
@@ -127,12 +127,12 @@ func (d *DriveDB) FileById(fileId string) (*gdrive.File, error) {
 }
 
 // InodeByID returns a File's inode number, given its ID.
-func (d *DriveDB) InodeByID(fileId string) (int64, error) {
-	var inode int64
+func (d *DriveDB) InodeByID(fileId string) (uint64, error) {
+	var inode uint64
 	ik := inodeKey(fileId)
 	err := d.get(ik, &inode)
 	if err != nil {
-		return -1, err
+		return 0, err
 	}
 	return inode, nil
 }
@@ -189,6 +189,7 @@ func (d *DriveDB) sync() {
 	// Get saved checkpoint.
 	err := d.get(internalKey("checkpoint"), &cpt)
 	if err != nil {
+		cpt.LastInode = 1 // 1 is reserved for the root inode
 		log.Printf("error reading checkpoint: %v", err)
 	}
 
