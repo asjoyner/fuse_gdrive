@@ -140,14 +140,17 @@ func (d *DriveDB) InodeByFileId(fileId string) (uint64, error) {
 
 // FileIdByInode returns the FileId associated with a given inode.
 func (d *DriveDB) FileIdByInode(inode uint64) (string, error) {
-	var fileId string
 	f2ik := inodeToFileIdKey(inode)
-	err := d.get(f2ik, &fileId)
+	data, err := d.db.Get(f2ik, nil)
 	if err != nil {
 		return "", err
 	}
-	return fileId, nil
+	return string(data), nil
 }
+
+// FileByInode
+//func (d *DriveDB) FileByInode(inode uint64) (*drive.File, error) {
+//}
 
 func (d *DriveDB) get(key []byte, item interface{}) error {
 	data, err := d.db.Get(key, nil)
