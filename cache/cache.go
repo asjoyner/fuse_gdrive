@@ -166,7 +166,8 @@ func (d *driveCache) getChunk(c chunk) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 206 && resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Failed to retrieve file, got HTTP status %v, want 206 or 200, asked for: %v", resp.StatusCode, spec)
+		err := fmt.Errorf("for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
+		return nil, err
 	}
 	chunkBytes, err := ioutil.ReadAll(resp.Body)
 	log.Printf("Chunk %d transferred at %v", c.n, getRate(int64(len(chunkBytes))))
