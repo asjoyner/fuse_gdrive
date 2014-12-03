@@ -37,17 +37,10 @@ var allowOther = flag.Bool("allow_other", false, "If other users are allowed to 
 var debugGdrive = flag.Bool("gdrive.debug", true, "print debug statements from the fuse_gdrive package")
 var driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
 
-var client *http.Client
-var service *drive.Service
-var driveCache cache.Reader
 var startup = time.Now()
 
 // https://developers.google.com/drive/web/folder
 var driveFolderMimeType string = "application/vnd.google-apps.folder"
-var uid uint32                    // uid of the user who mounted the FS
-var gid uint32                    // gid of the user who mounted the FS
-var account string                // email address of the mounted google drive account
-var rootId string                 // Drive Id of the root of the FS
 
 var debug debugging
 
@@ -66,13 +59,9 @@ var Usage = func() {
 }
 
 // FuseServe receives and dispatches Requests from the kernel
-func FuseServe(c *fuse.Conn, db *drive_db.DriveDB) error {
-	sc := serveConn{db: db,
-		handles: make(map[fuse.HandleID]string),
-		launch:  time.Unix(1335225600, 0),
-	}
+func (sc *serveConn) Serve() error {
 	for {
-		req, err := c.ReadRequest()
+		req, err := sc.conn.ReadRequest()
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -89,19 +78,23 @@ func FuseServe(c *fuse.Conn, db *drive_db.DriveDB) error {
 		go sc.serve(req)
 	}
 	return nil
-
 }
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
 	sync.Mutex
-	db *drive_db.DriveDB
+	db         *drive_db.DriveDB
+	driveCache cache.Reader
 	// handles maps a kernel fuse filehandle id to a drive file id
 	// held open by the kernel from OpenRequest() until it sends ForgetRequest()
 	// This is a sparse map, presence of a HandleID indicates the kernel has it open
 	handles map[fuse.HandleID]string
 	launch  time.Time
-	nodeGen uint64
+	nodeGen uint64 // generation number, not using this right yet...
+	rootId  string // the fileId of the root
+	uid     uint32 // uid of the user who mounted the FS
+	gid     uint32 // gid of the user who mounted the FS
+	conn    *fuse.Conn
 }
 
 func (sc *serveConn) serve(req fuse.Request) {
@@ -134,8 +127,8 @@ func (sc *serveConn) serve(req fuse.Request) {
 			attr.Mtime = sc.launch
 			attr.Ctime = sc.launch
 			attr.Crtime = sc.launch
-			attr.Uid = uid
-			attr.Gid = gid
+			attr.Uid = sc.uid
+			attr.Gid = sc.gid
 		} else {
 			id, err := sc.db.FileIdByInode(inode)
 			if err != nil {
@@ -150,7 +143,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 				break
 			}
 
-			attr = AttrFromFile(f, inode)
+			attr = sc.AttrFromFile(f, inode)
 		}
 		resp.Attr = attr
 		fuse.Debug(resp)
@@ -202,11 +195,10 @@ func (sc *serveConn) serve(req fuse.Request) {
 				resp.Node = fuse.NodeID(inode)
 				sc.Lock()
 				resp.Generation = sc.nodeGen
-				sc.nodeGen++
 				sc.Unlock()
 				resp.EntryValid = *driveMetadataLatency
 				resp.AttrValid = *driveMetadataLatency
-				resp.Attr = AttrFromFile(cf, inode)
+				resp.Attr = sc.AttrFromFile(cf, inode)
 				fmt.Printf("%+v\n", resp)
 				req.Respond(resp)
 				break
@@ -224,7 +216,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 		var fileId string
 		var err error
 		if inode == 1 {
-			fileId = rootId
+			fileId = sc.rootId
 		} else {
 			fileId, err = sc.db.FileIdByInode(inode)
 			if err != nil {
@@ -297,7 +289,7 @@ func (sc *serveConn) ReadDir(fileId string) ([]byte, error) {
 	var dirs []fuse.Dirent
 	var children []string
 	var err error
-	if fileId == rootId {
+	if fileId == sc.rootId {
 		children, err = sc.db.RootFileIds()
 		if err != nil {
 			return nil, fmt.Errorf("RootFileIds %d: %v", fileId, err)
@@ -341,14 +333,14 @@ func (sc *serveConn) Read(fileId string, offset int64, size int) ([]byte, error)
 		return nil, io.EOF
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, offset, size)
-	b, err := driveCache.Read(f.DownloadUrl, offset, int64(size), f.FileSize)
+	b, err := sc.driveCache.Read(f.DownloadUrl, offset, int64(size), f.FileSize)
 	if err != nil {
 		return nil, fmt.Errorf("driveCache.Read (..%v..): %v", offset, err)
 	}
 	return b, nil
 }
 
-func AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
+func (sc *serveConn) AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
 	var atime, mtime, crtime time.Time
 	if err := atime.UnmarshalText([]byte(file.LastViewedByMeDate)); err != nil {
 		atime = startup
@@ -365,8 +357,8 @@ func AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
 		Mtime:  mtime,
 		Ctime:  mtime,
 		Crtime: crtime,
-		Uid:    uid,
-		Gid:    gid,
+		Uid:    sc.uid,
+		Gid:    sc.gid,
 		Mode:   0755,
 		Size:   uint64(file.FileSize),
 		Blocks: uint64(file.FileSize),
@@ -450,12 +442,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("unable to get UID/GID of current user: %v", err)
 	}
-	uid = uint32(uidInt)
+	uid := uint32(uidInt)
 	gidInt, err := strconv.Atoi(userCurrent.Gid)
 	if err != nil {
 		log.Fatalf("unable to get UID/GID of current user: %v", err)
 	}
-	gid = uint32(gidInt)
+	gid := uint32(gidInt)
 
 	if err = sanityCheck(mountpoint); err != nil {
 		log.Fatalf("sanityCheck failed: %s\n", err)
@@ -464,21 +456,22 @@ func main() {
 	http.HandleFunc("/", RootHandler)
 	go http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
 
+	var client *http.Client
 	if *readOnly {
 		client = getOAuthClient(drive.DriveReadonlyScope)
 	} else {
 		client = getOAuthClient(drive.DriveScope)
 	}
 
-	driveCache = cache.NewCache("/tmp", client)
+	driveCache := cache.NewCache("/tmp", client)
 
-	service, _ = drive.New(client)
+	service, _ := drive.New(client)
 	about, err := service.About.Get().Do()
 	if err != nil {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
 
-	// Create and start the drive syncer.
+	// Create and start the drive metadata syncer.
 	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
 	log.Printf("using drivedb: %v", dbpath)
 	db, err := drive_db.NewDriveDB(service, dbpath)
@@ -489,8 +482,10 @@ func main() {
 	db.WaitUntilSynced()
 	log.Printf("synced!")
 
-	rootId = about.RootFolderId
-	account = about.User.EmailAddress
+	// fileId of the root of the FS (aka "My Drive")
+	rootId := about.RootFolderId
+	// email address of the mounted google drive account
+	account := about.User.EmailAddress
 
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),
@@ -515,11 +510,22 @@ func main() {
 	signal.Notify(sig, os.Interrupt)
 	go func() {
 		for _ = range sig {
-			fuse.Unmount(mountpoint)
+			if err := fuse.Unmount(mountpoint); err != nil {
+				log.Printf("fuse.Unmount failed: %v", err)
+			}
 		}
 	}()
 
-	err = FuseServe(c, db)
+	sc := serveConn{db: db,
+		driveCache: driveCache,
+		handles:    make(map[fuse.HandleID]string),
+		launch:     time.Unix(1335225600, 0),
+		uid:        uid,
+		gid:        gid,
+		rootId:     rootId,
+		conn:       c,
+	}
+	err = sc.Serve()
 	if err != nil {
 		log.Fatalln("fuse server failed: ", err)
 	}
