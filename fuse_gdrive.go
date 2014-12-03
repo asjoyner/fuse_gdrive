@@ -139,7 +139,6 @@ func main() {
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),
 		fuse.Subtype("gdrive"),
-		fuse.LocalVolume(),
 		fuse.VolumeName(account),
 	}
 
@@ -167,7 +166,7 @@ func main() {
 
 	sc := serveConn{db: db,
 		driveCache: driveCache,
-		handles:    make(map[fuse.HandleID]string),
+		//handles:    make(map[fuse.HandleID]string),
 		launch:     time.Unix(1335225600, 0),
 		uid:        uid,
 		gid:        gid,

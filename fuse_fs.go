@@ -4,7 +4,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"math"
 	_ "net/http/pprof"
 	"os"
 	"sync"
@@ -28,12 +27,7 @@ type serveConn struct {
 	sync.Mutex
 	db         *drive_db.DriveDB
 	driveCache cache.Reader
-	// handles maps a kernel fuse filehandle id to a drive file id
-	// held open by the kernel from OpenRequest() until it sends ForgetRequest()
-	// This is a sparse map, presence of a HandleID indicates the kernel has it open
-	handles map[fuse.HandleID]string
 	launch  time.Time
-	nodeGen uint64 // generation number, not using this right yet...
 	rootId  string // the fileId of the root
 	uid     uint32 // uid of the user who mounted the FS
 	gid     uint32 // gid of the user who mounted the FS
@@ -51,13 +45,13 @@ func (sc *serveConn) Serve() error {
 			return err
 		}
 
-		/* TODO: see c.req[hdr.ID] != nil in fs/serve.go
-		if req.Header.ID != nil {
-			intr = nil
-		}
-		*/
 		fuse.Debug(fmt.Sprintf("%+v", req))
-		go sc.serve(req)
+
+		// TODO: paralellize this, after I figure out why every parallel request
+		// causes a panic on null pointer dereference when responding to the one or
+		// the other request.
+		//go sc.serve(req)
+		sc.serve(req)
 	}
 	return nil
 }
@@ -159,7 +153,6 @@ func (sc *serveConn) serve(req fuse.Request) {
 				}
 				resp.Node = fuse.NodeID(inode)
 				sc.Lock()
-				resp.Generation = sc.nodeGen
 				sc.Unlock()
 				resp.EntryValid = *driveMetadataLatency
 				resp.AttrValid = *driveMetadataLatency
@@ -175,52 +168,29 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.ForgetRequest:
 		req.Respond()
 
-	// Allocate a file handle for an inode, if it's a valid fileId
+	// Hand back the inode as the HandleID
 	case *fuse.OpenRequest:
-		inode := uint64(req.Header.Node)
-		var fileId string
-		var err error
-		if inode == 1 {
-			fileId = sc.rootId
-		} else {
-			fileId, err = sc.db.FileIdByInode(inode)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("failure looking up inode %d: %v", inode, err))
-				req.RespondError(fuse.ENOENT)
-				break
-			}
+		/* // TODO: Remove Me.  The kernel should never ask to open an inode that
+		* it hasn't already called Lookup on... so we don't need this check...
+		if _, err := fileId, err := sc.db.FileIdByInode(inode); err != nil {
+			req.RespondError(fuse.ENOENT)
+			break
 		}
-		// Allocate a handle
-		sc.Lock()
-		var resp fuse.OpenResponse
-		for i := 1; i < math.MaxInt32; i++ {
-			if _, ok := sc.handles[fuse.HandleID(i)]; !ok {
-				sc.handles[fuse.HandleID(i)] = fileId
-				resp.Handle = fuse.HandleID(i)
-				break
-			}
-		}
-		sc.Unlock()
-		if resp.Handle == 0 {
-			fuse.Debug(fmt.Sprintf("failure allocating a file handle for open on inode %v", inode))
-			req.RespondError(fuse.EIO)
-		} else {
-			req.Respond(&resp)
-		}
+		*/
+		req.Respond(&fuse.OpenResponse{Handle: fuse.HandleID(req.Header.Node)})
 
 	// Return Dirent
 	case *fuse.ReadRequest:
 		// Lookup which fileId this request refers to
-		sc.Lock()
-		fileId, ok := sc.handles[req.Handle]
-		sc.Unlock()
-		if !ok {
-			req.RespondError(fuse.ESTALE)
+		inode := uint64(req.Header.Node)
+		fileId, err := sc.db.FileIdByInode(inode)
+		if err != nil {
+			fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
+			req.RespondError(fuse.ENOENT)
 			break
 		}
 		resp := &fuse.ReadResponse{Data: make([]byte, 0, req.Size)}
 		var data []byte
-		var err error
 		if req.Dir {
 			data, err = sc.ReadDir(fileId)
 		} else {
@@ -238,11 +208,8 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.FlushRequest:
 		req.Respond()
 
-	// Ack release of a file handle the kernel held mapping an inode->fileId
+	// Ack release of the kernel's mapping an inode->fileId
 	case *fuse.ReleaseRequest:
-		sc.Lock()
-		delete(sc.handles, req.Handle)
-		sc.Unlock()
 		req.Respond()
 
 	case *fuse.DestroyRequest:
