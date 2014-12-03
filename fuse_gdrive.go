@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
-	"math"
 	"os"
 	"os/signal"
 	"os/user"
@@ -25,8 +25,8 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"bazil.org/fuse/fuseutil"
 	_ "bazil.org/fuse/fs/fstestutil"
+	"bazil.org/fuse/fuseutil"
 
 	"github.com/asjoyner/fuse_gdrive/cache"
 	"github.com/asjoyner/fuse_gdrive/drive_db"
@@ -97,7 +97,7 @@ func FuseServe(c *fuse.Conn, db *drive_db.DriveDB) error {
 // serveConn holds the state about the fuse connection
 type serveConn struct {
 	sync.Mutex
-	db      *drive_db.DriveDB
+	db *drive_db.DriveDB
 	// handles maps a kernel fuse filehandle id to a drive file id
 	// held open by the kernel from OpenRequest() until it sends ForgetRequest()
 	// This is a sparse map, presence of a HandleID indicates the kernel has it open
@@ -238,7 +238,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 		// Allocate a handle
 		sc.Lock()
 		var resp fuse.OpenResponse
-		for i := 1; i<math.MaxInt32; i++ {
+		for i := 1; i < math.MaxInt32; i++ {
 			if _, ok := sc.handles[fuse.HandleID(i)]; !ok {
 				sc.handles[fuse.HandleID(i)] = fileId
 				resp.Handle = fuse.HandleID(i)
