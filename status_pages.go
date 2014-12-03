@@ -22,6 +22,7 @@ func (t FilesPage) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+/*
 type TreePage struct {
 	tree Node
 }
@@ -41,6 +42,7 @@ func (t TreePage) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	t.tree.PrintChildren(w, 0)
 }
+*/
 
 func RootHandler(w http.ResponseWriter, req *http.Request) {
 	// The "/" pattern matches everything, so we need to check

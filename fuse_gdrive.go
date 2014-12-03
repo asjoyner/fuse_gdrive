@@ -24,7 +24,6 @@ import (
 	drive "code.google.com/p/google-api-go-client/drive/v2"
 
 	"bazil.org/fuse"
-	"bazil.org/fuse/fs"
 	_ "bazil.org/fuse/fs/fstestutil"
 	"bazil.org/fuse/fuseutil"
 
@@ -49,7 +48,6 @@ var uid uint32                    // uid of the user who mounted the FS
 var gid uint32                    // gid of the user who mounted the FS
 var account string                // email address of the mounted google drive account
 var rootId string                 // Drive Id of the root of the FS
-var rootChildren map[string]*Node // children of the root node of the FS
 
 var debug debugging
 
@@ -295,88 +293,6 @@ func (sc *serveConn) serve(req fuse.Request) {
 	}
 }
 
-func AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
-	var atime, mtime, crtime time.Time
-	if err := atime.UnmarshalText([]byte(file.LastViewedByMeDate)); err != nil {
-		atime = startup
-	}
-	if err := mtime.UnmarshalText([]byte(file.ModifiedDate)); err != nil {
-		mtime = startup
-	}
-	if err := crtime.UnmarshalText([]byte(file.CreatedDate)); err != nil {
-		crtime = startup
-	}
-	attr := fuse.Attr{
-		Inode:  inode,
-		Atime:  atime,
-		Mtime:  mtime,
-		Ctime:  mtime,
-		Crtime: crtime,
-		Uid:    uid,
-		Gid:    gid,
-		Mode:   0755,
-		Size:   uint64(file.FileSize),
-		Blocks: uint64(file.FileSize),
-	}
-	if file.MimeType == driveFolderMimeType {
-		attr.Mode = os.ModeDir | 0755
-	}
-	return attr
-}
-
-// FS implements Root() to pass the 'tree' to Fuse
-type FS struct {
-	root *Node
-}
-
-func (s *FS) Root() (fs.Node, fuse.Error) {
-	return s.root, nil
-}
-
-// don't think this does anything?  still don't see async reads  :-/
-func (s *serveConn) Init(req *fuse.InitRequest, resp *fuse.InitResponse, intr fs.Intr) fuse.Error {
-	debug.Printf("Init flags: %+v", req.Flags.String())
-	resp.MaxWrite = 128 * 1024
-	resp.Flags = fuse.InitBigWrites & fuse.InitAsyncRead
-	return nil
-}
-
-// Node represents a file (or folder) in Drive.
-type Node struct {
-	Id          string
-	Mu          sync.Mutex
-	Children    map[string]*Node
-	Parents     []string
-	Inode       uint64
-	Title       string
-	isDir       bool
-	FileSize    int64
-	DownloadUrl string
-	Atime       time.Time
-	Mtime       time.Time
-	Ctime       time.Time
-	Crtime      time.Time
-}
-
-func (n *Node) Attr() fuse.Attr {
-	a := fuse.Attr{Inode: n.Inode,
-		Uid:    uid,
-		Gid:    gid,
-		Atime:  n.Atime,
-		Mtime:  n.Mtime,
-		Ctime:  n.Ctime,
-		Crtime: n.Crtime,
-	}
-	if n.isDir {
-		a.Mode = os.ModeDir | 0555
-		return a
-	} else {
-		a.Mode = 0444
-		a.Size = uint64(n.FileSize)
-		return a
-	}
-}
-
 func (sc *serveConn) ReadDir(fileId string) ([]byte, error) {
 	var dirs []fuse.Dirent
 	var children []string
@@ -432,8 +348,37 @@ func (sc *serveConn) Read(fileId string, offset int64, size int) ([]byte, error)
 	return b, nil
 }
 
-func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error) {
-	// req: Mkdir [ID=0x12 Node=0x1 Uid=13040 Gid=5000 Pid=50632] "test" mode=drwxr-xr-x
+func AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
+	var atime, mtime, crtime time.Time
+	if err := atime.UnmarshalText([]byte(file.LastViewedByMeDate)); err != nil {
+		atime = startup
+	}
+	if err := mtime.UnmarshalText([]byte(file.ModifiedDate)); err != nil {
+		mtime = startup
+	}
+	if err := crtime.UnmarshalText([]byte(file.CreatedDate)); err != nil {
+		crtime = startup
+	}
+	attr := fuse.Attr{
+		Inode:  inode,
+		Atime:  atime,
+		Mtime:  mtime,
+		Ctime:  mtime,
+		Crtime: crtime,
+		Uid:    uid,
+		Gid:    gid,
+		Mode:   0755,
+		Size:   uint64(file.FileSize),
+		Blocks: uint64(file.FileSize),
+	}
+	if file.MimeType == driveFolderMimeType {
+		attr.Mode = os.ModeDir | 0755
+	}
+	return attr
+}
+
+/*
+func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	// TODO: if allow_other, require uid == invoking uid to allow writes
 	p := []*drive.ParentReference{&drive.ParentReference{Id: n.Id}}
 	f := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
@@ -448,6 +393,7 @@ func (n *Node) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error)
 	n.Children[node.Title] = node
 	return n, nil
 }
+*/
 
 // TODO: Implement remove (doubles as rmdir)
 /*
