@@ -6,10 +6,7 @@ import (
 	"io"
 	_ "net/http/pprof"
 	"os"
-	"sync"
 	"time"
-
-	drive "code.google.com/p/google-api-go-client/drive/v2"
 
 	"bazil.org/fuse"
 	_ "bazil.org/fuse/fs/fstestutil"
@@ -24,7 +21,6 @@ var driveFolderMimeType string = "application/vnd.google-apps.folder"
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
-	sync.Mutex
 	db         *drive_db.DriveDB
 	driveCache cache.Reader
 	launch  time.Time
@@ -89,20 +85,14 @@ func (sc *serveConn) serve(req fuse.Request) {
 			attr.Uid = sc.uid
 			attr.Gid = sc.gid
 		} else {
-			id, err := sc.db.FileIdByInode(inode)
+			f, err := sc.db.FileByInode(inode)
 			if err != nil {
-				fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
-				req.RespondError(fuse.ENOENT)
-				break
-			}
-			f, err := sc.db.FileById(id)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("file lookup failure: %v", err))
+				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
 				req.RespondError(fuse.EIO)
 				break
 			}
 
-			attr = sc.AttrFromFile(f, inode)
+			attr = sc.AttrFromFile(f)
 		}
 		resp.Attr = attr
 		fuse.Debug(resp)
@@ -113,51 +103,47 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.LookupRequest:
 		inode := uint64(req.Header.Node)
 		resp := &fuse.LookupResponse{}
-		var childFileIds []string
+		var childInodes []uint64
 		var err error
 		if inode == 1 {
-			childFileIds, err = sc.db.RootFileIds()
+			childInodes = sc.db.RootInodes()
 			if err != nil {
-				fuse.Debug(fmt.Sprintf("RootFileIDs lookup failure: %v", err))
+				fuse.Debug(fmt.Sprintf("RootInodes lookup failure: %v", err))
 				req.RespondError(fuse.ENOENT)
 				break
 			}
 		} else {
-			fileId, err := sc.db.FileIdByInode(inode)
+			file, err := sc.db.FileByInode(inode)
 			if err != nil {
-				fuse.Debug(fmt.Sprintf("FileIdByInode lookup failure for %d: %v", inode, err))
+				fuse.Debug(fmt.Sprintf("FileByInode lookup failure for %d: %v", inode, err))
 				req.RespondError(fuse.ENOENT)
 				break
 			}
-			childFileIds, err = sc.db.ChildFileIds(fileId)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("child id lookup failure: %v", err))
-				req.RespondError(fuse.ENOENT)
-				break
+			for _, inode := range file.Children {
+				child, err := sc.db.FileByInode(inode)
+				if err != nil {
+					fuse.Debug(fmt.Sprintf("child inode %v lookup failure: %v", inode, err))
+					req.RespondError(fuse.ENOENT)
+					break
+				}
+				childInodes = append(childInodes, child.Inode)
 			}
 		}
 
-		for _, childId := range childFileIds {
-			cf, err := sc.db.FileById(childId)
+		for _, inode := range childInodes {
+			cf, err := sc.db.FileByInode(inode)
 			if err != nil {
-				fuse.Debug(fmt.Sprintf("FileById lookup failure on childId : %v", childId, err))
+				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
 				req.RespondError(fuse.EIO)
 				break
 			}
 			if cf.Title == req.Name {
-				inode, err := sc.db.InodeByFileId(childId)
-				if err != nil {
-					fuse.Debug(fmt.Sprintf("InodeByFileId lookup failure on fileId %v: %v", childId, err))
-					req.RespondError(fuse.EIO)
-					break
-				}
 				resp.Node = fuse.NodeID(inode)
-				sc.Lock()
-				sc.Unlock()
 				resp.EntryValid = *driveMetadataLatency
 				resp.AttrValid = *driveMetadataLatency
-				resp.Attr = sc.AttrFromFile(cf, inode)
+				resp.Attr = sc.AttrFromFile(cf)
 				fmt.Printf("%+v\n", resp)
+				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
 				req.Respond(resp)
 				break
 			}
@@ -183,18 +169,13 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.ReadRequest:
 		// Lookup which fileId this request refers to
 		inode := uint64(req.Header.Node)
-		fileId, err := sc.db.FileIdByInode(inode)
-		if err != nil {
-			fuse.Debug(fmt.Sprintf("inode lookup failure: %v", err))
-			req.RespondError(fuse.ENOENT)
-			break
-		}
 		resp := &fuse.ReadResponse{Data: make([]byte, 0, req.Size)}
 		var data []byte
+		var err error
 		if req.Dir {
-			data, err = sc.ReadDir(fileId)
+			data, err = sc.ReadDir(inode)
 		} else {
-			data, err = sc.Read(fileId, req.Offset, req.Size)
+			data, err = sc.Read(inode, req.Offset, req.Size)
 		}
 		if err != nil {
 			fuse.Debug(fmt.Sprintf("read failure: %v", err))
@@ -217,36 +198,33 @@ func (sc *serveConn) serve(req fuse.Request) {
 	}
 }
 
-func (sc *serveConn) ReadDir(fileId string) ([]byte, error) {
+func (sc *serveConn) ReadDir(inode uint64) ([]byte, error) {
 	var dirs []fuse.Dirent
-	var children []string
+	var children []uint64
 	var err error
-	if fileId == sc.rootId {
-		children, err = sc.db.RootFileIds()
+	if inode == 1 {
+		children = sc.db.RootInodes()
 		if err != nil {
-			return nil, fmt.Errorf("RootFileIds %d: %v", fileId, err)
+			return nil, fmt.Errorf("RootInodes: %v", err)
 		}
 	} else {
-		children, err = sc.db.ChildFileIds(fileId)
+		file, err := sc.db.FileByInode(inode)
 		if err != nil {
-			return nil, fmt.Errorf("ChildFileIds on fileId %d: %v", fileId, err)
+			return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
 		}
+		children = file.Children
 	}
 
-	for _, cId := range children {
-		f, err := sc.db.FileById(cId)
+	for _, inode := range children {
+		f, err := sc.db.FileByInode(inode)
 		if err != nil {
-			return nil, fmt.Errorf("FileById on cId %d: %v", cId, err)
-		}
-		inode, err := sc.db.InodeByFileId(cId)
-		if err != nil {
-			return nil, fmt.Errorf("InodeByFileId on cId %d: %v", cId, err)
+			return nil, fmt.Errorf("FileByInode on child inode %d: %v", inode, err)
 		}
 		childType := fuse.DT_File
 		if f.MimeType == driveFolderMimeType {
 			childType = fuse.DT_Dir
 		}
-		dirs = append(dirs, fuse.Dirent{Inode: inode, Name: f.Title, Type: childType})
+		dirs = append(dirs, fuse.Dirent{Inode: f.Inode, Name: f.Title, Type: childType})
 	}
 	fuse.Debug(fmt.Sprintf("%+v", dirs))
 	var data []byte
@@ -256,10 +234,10 @@ func (sc *serveConn) ReadDir(fileId string) ([]byte, error) {
 	return data, nil
 }
 
-func (sc *serveConn) Read(fileId string, offset int64, size int) ([]byte, error) {
-	f, err := sc.db.FileById(fileId)
+func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) {
+	f, err := sc.db.FileByInode(inode)
 	if err != nil {
-		return nil, fmt.Errorf("FileById on fileId %d: %v", fileId, err)
+		return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
 	}
 	if f.DownloadUrl == "" { // If there is no downloadUrl, there is no body
 		return nil, io.EOF
@@ -272,7 +250,7 @@ func (sc *serveConn) Read(fileId string, offset int64, size int) ([]byte, error)
 	return b, nil
 }
 
-func (sc *serveConn) AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
+func (sc *serveConn) AttrFromFile(file drive_db.File) fuse.Attr {
 	var atime, mtime, crtime time.Time
 	if err := atime.UnmarshalText([]byte(file.LastViewedByMeDate)); err != nil {
 		atime = startup
@@ -284,7 +262,7 @@ func (sc *serveConn) AttrFromFile(file *drive.File, inode uint64) fuse.Attr {
 		crtime = startup
 	}
 	attr := fuse.Attr{
-		Inode:  inode,
+		Inode:  file.Inode,
 		Atime:  atime,
 		Mtime:  mtime,
 		Ctime:  mtime,

@@ -18,12 +18,20 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
+type File struct {
+	*gdrive.File
+	Inode uint64
+	Children []uint64  // inodes of children
+}
+
 type DriveDB struct {
+	sync.Mutex
 	service *gdrive.Service
 	db      *leveldb.DB
 	syncmu  sync.Mutex
 	synced  *sync.Cond
 	iters   sync.WaitGroup
+	files		map[uint64]File
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -149,8 +157,70 @@ func (d *DriveDB) FileIdByInode(inode uint64) (string, error) {
 }
 
 // FileByInode
-//func (d *DriveDB) FileByInode(inode uint64) (*drive.File, error) {
-//}
+func (d *DriveDB) FileByInode(inode uint64) (File, error) {
+	d.Lock()
+	defer d.Unlock()
+	if f, ok := d.files[inode]; ok {
+		return f, nil
+	}
+	return File{}, fmt.Errorf("file not found")
+}
+
+// RootInodes returns the inodes of all Google Drive file objects that are
+// children of the root.
+func (d *DriveDB) RootInodes() []uint64 {
+	var ids []uint64
+	d.Lock()
+	defer d.Unlock()
+	for _, f := range d.files {
+		for _, p := range f.Parents {
+			if p.IsRoot {
+				ids = append(ids, f.Inode)
+			}
+		}
+	}
+	return ids
+}
+
+// Build the mapping of inode->File objects
+func (d *DriveDB) RebuildCache() error {
+	newCache := make(map[uint64]File)
+	ids, err := d.AllFileIds()
+	if err != nil {
+		return fmt.Errorf("AllFileIds: %v", err)
+	}
+	for _, fileId := range ids {
+		driveFile, err := d.FileById(fileId)
+		if err != nil {
+			return fmt.Errorf("FileById(%v): %v", fileId, err)
+		}
+		file := File{driveFile, 0, nil}
+
+		file.Inode, err = d.InodeByFileId(fileId)
+		if err != nil {
+			return fmt.Errorf("InodeByFileId(%v): %v", fileId, err)
+		}
+
+		childFileIds, err := d.ChildFileIds(fileId)
+		if err != nil {
+				return fmt.Errorf("ChildFileIds(%v): %v", fileId, err)
+		}
+		file.Children = make([]uint64, len(childFileIds))
+		for i, fileId := range childFileIds {
+			inode, err := d.InodeByFileId(fileId)
+			if err != nil {
+				return fmt.Errorf("FileById(%v): %v", fileId, err)
+			}
+			file.Children[i] = inode
+		}
+		newCache[file.Inode] = file
+	}
+	log.Printf("Updating cache with %d objects\n", len(newCache))
+	d.Lock()
+	d.files = newCache
+	d.Unlock()
+	return nil
+}
 
 func (d *DriveDB) get(key []byte, item interface{}) error {
 	data, err := d.db.Get(key, nil)
@@ -231,12 +301,14 @@ func (d *DriveDB) sync() {
 
 		// Already synced
 		if cpt.LastChangeID >= c.LargestChangeId {
+			d.RebuildCache()
 			d.synced.Broadcast()
 			d.pollSleep()
 			continue
 		}
 
 		if len(c.Items) == 0 {
+			d.RebuildCache()
 			d.synced.Broadcast()
 			d.pollSleep()
 			continue
@@ -339,6 +411,7 @@ func (d *DriveDB) sync() {
 
 		// Signal we're synced, if we are.
 		if cpt.LastChangeID >= c.LargestChangeId {
+			d.RebuildCache()
 			d.synced.Broadcast()
 			d.pollSleep()
 		}
