@@ -142,7 +142,6 @@ func (sc *serveConn) serve(req fuse.Request) {
 				resp.EntryValid = *driveMetadataLatency
 				resp.AttrValid = *driveMetadataLatency
 				resp.Attr = sc.AttrFromFile(cf)
-				fmt.Printf("%+v\n", resp)
 				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
 				req.Respond(resp)
 				break
@@ -239,11 +238,12 @@ func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
 	}
-	if f.DownloadUrl == "" { // If there is no downloadUrl, there is no body
+	url := sc.db.FreshDownloadUrl(f)
+	if url == "" {  // If there is no url, the file has no body
 		return nil, io.EOF
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, offset, size)
-	b, err := sc.driveCache.Read(f.DownloadUrl, offset, int64(size), f.FileSize)
+	b, err := sc.driveCache.Read(url, offset, int64(size), f.FileSize)
 	if err != nil {
 		return nil, fmt.Errorf("driveCache.Read (..%v..): %v", offset, err)
 	}

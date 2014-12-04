@@ -18,10 +18,14 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
+const downloadUrlLifetime = time.Duration(time.Hour*12)
+
 type File struct {
 	*gdrive.File
 	Inode uint64
 	Children []uint64  // inodes of children
+	cachedDownloadUrl string
+	cachedDownloadUrlTime time.Time
 }
 
 type DriveDB struct {
@@ -194,7 +198,7 @@ func (d *DriveDB) RebuildCache() error {
 		if err != nil {
 			return fmt.Errorf("FileById(%v): %v", fileId, err)
 		}
-		file := File{driveFile, 0, nil}
+		file := File{driveFile, 0, nil, "", time.Time{}}
 
 		file.Inode, err = d.InodeByFileId(fileId)
 		if err != nil {
@@ -220,6 +224,45 @@ func (d *DriveDB) RebuildCache() error {
 	d.files = newCache
 	d.Unlock()
 	return nil
+}
+
+// Refresh the file object of the given fileId
+func (d *DriveDB) Refresh(fileId string) error {
+  f, err := d.service.Files.Get(fileId).Do()
+  if err != nil {
+    return err
+  }
+	fkey := fileKey(fileId)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	err = enc.Encode(f)
+	if err != nil {
+		return fmt.Errorf("error encoding file %v: %v", fileId, err)
+	}
+	d.db.Put(fkey, buf.Bytes(), nil)
+	d.RebuildCache()
+	return nil
+}
+
+// The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
+// hint: "403 Forbidden" is returned when it has expired
+func (d *DriveDB) FreshDownloadUrl(f File) string {
+	if f.DownloadUrl == "" {
+		return ""
+	}
+	if time.Since(f.cachedDownloadUrlTime) < downloadUrlLifetime {
+		return f.cachedDownloadUrl
+	}
+	log.Printf("Refreshing DownloadUrl for %v", f.Title)
+  fresh, err := d.service.Files.Get(f.Id).Do()
+  if err != nil {
+		log.Printf("Failed to refresh DownloadUrl: %v", err)
+    return f.DownloadUrl
+  }
+	f.cachedDownloadUrl = fresh.DownloadUrl
+	f.cachedDownloadUrlTime = time.Now()
+	log.Printf("Cached DownloadUrl for %v for %v", f.Title, downloadUrlLifetime)
+	return fresh.DownloadUrl
 }
 
 func (d *DriveDB) get(key []byte, item interface{}) error {
