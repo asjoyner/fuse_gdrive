@@ -92,7 +92,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 				break
 			}
 
-			attr = sc.AttrFromFile(f)
+			attr = sc.AttrFromFile(*f)
 		}
 		resp.Attr = attr
 		fuse.Debug(resp)
@@ -141,7 +141,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 				resp.Node = fuse.NodeID(inode)
 				resp.EntryValid = *driveMetadataLatency
 				resp.AttrValid = *driveMetadataLatency
-				resp.Attr = sc.AttrFromFile(cf)
+				resp.Attr = sc.AttrFromFile(*cf)
 				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
 				req.Respond(resp)
 				break

@@ -35,7 +35,7 @@ type DriveDB struct {
 	syncmu  sync.Mutex
 	synced  *sync.Cond
 	iters   sync.WaitGroup
-	files		map[uint64]File
+	files		map[uint64]*File
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -161,13 +161,13 @@ func (d *DriveDB) FileIdByInode(inode uint64) (string, error) {
 }
 
 // FileByInode
-func (d *DriveDB) FileByInode(inode uint64) (File, error) {
+func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	d.Lock()
 	defer d.Unlock()
 	if f, ok := d.files[inode]; ok {
 		return f, nil
 	}
-	return File{}, fmt.Errorf("file not found")
+	return &File{}, fmt.Errorf("file not found")
 }
 
 // RootInodes returns the inodes of all Google Drive file objects that are
@@ -188,7 +188,7 @@ func (d *DriveDB) RootInodes() []uint64 {
 
 // Build the mapping of inode->File objects
 func (d *DriveDB) RebuildCache() error {
-	newCache := make(map[uint64]File)
+	newCache := make(map[uint64]*File)
 	ids, err := d.AllFileIds()
 	if err != nil {
 		return fmt.Errorf("AllFileIds: %v", err)
@@ -217,7 +217,7 @@ func (d *DriveDB) RebuildCache() error {
 			}
 			file.Children[i] = inode
 		}
-		newCache[file.Inode] = file
+		newCache[file.Inode] = &file
 	}
 	log.Printf("Updating cache with %d objects\n", len(newCache))
 	d.Lock()
@@ -246,7 +246,7 @@ func (d *DriveDB) Refresh(fileId string) error {
 
 // The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
 // hint: "403 Forbidden" is returned when it has expired
-func (d *DriveDB) FreshDownloadUrl(f File) string {
+func (d *DriveDB) FreshDownloadUrl(f *File) string {
 	if f.DownloadUrl == "" {
 		return ""
 	}
