@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gdrive "code.google.com/p/google-api-go-client/drive/v2"
+	"github.com/asjoyner/fuse_gdrive/lru"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/filter"
@@ -18,24 +19,30 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
-const downloadUrlLifetime = time.Duration(time.Hour*12)
+const downloadUrlLifetime = time.Duration(time.Hour * 12)
 
 type File struct {
 	*gdrive.File
-	Inode uint64
-	Children []uint64  // inodes of children
-	cachedDownloadUrl string
+	Inode                 uint64
+	Children              []uint64 // inodes of children
+	cachedDownloadUrl     string
 	cachedDownloadUrlTime time.Time
+}
+
+type CheckPoint struct {
+	LastChangeID int64
+	LastInode    uint64
 }
 
 type DriveDB struct {
 	sync.Mutex
-	service *gdrive.Service
-	db      *leveldb.DB
-	syncmu  sync.Mutex
-	synced  *sync.Cond
-	iters   sync.WaitGroup
-	files		map[uint64]*File
+	service  *gdrive.Service
+	db       *leveldb.DB
+	syncmu   sync.Mutex
+	synced   *sync.Cond
+	iters    sync.WaitGroup
+	cpt      CheckPoint
+	lruCache *lru.Cache // inode to *File
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -60,18 +67,163 @@ func NewDriveDB(svc *gdrive.Service, filepath string) (*DriveDB, error) {
 	}
 
 	d := &DriveDB{
-		service: svc,
-		db:      db,
+		service:  svc,
+		db:       db,
+		lruCache: lru.New(int(1000)), // make the value tunable
 	}
+
+	// Get saved checkpoint.
+	err = d.get(internalKey("checkpoint"), &d.cpt)
+	if err != nil {
+		log.Printf("error reading checkpoint: %v", err)
+		d.cpt.LastInode = 1000 // start high, to allow "special" inodes
+	}
+	err = d.writeCheckpoint(nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not write checkpoint: %v", err)
+	}
+	log.Printf("Checkpoint: %v", d.cpt)
+
 	d.synced = sync.NewCond(&d.syncmu)
 
 	go d.sync()
 	return d, nil
 }
 
-type CheckPoint struct {
-	LastChangeID int64
-	LastInode    uint64
+// LevelDB key helpers. Key prefixes are 3 chars and ":".
+func internalKey(key string) []byte {
+	return []byte("int:" + key)
+}
+
+func fileIdToInodeKey(key string) []byte {
+	return []byte("f2i:" + key)
+}
+
+func inodeToFileIdKey(key uint64) []byte {
+	return []byte("i2f:" + fmt.Sprintf("%d", key))
+}
+
+func fileKey(key string) []byte {
+	return []byte("fid:" + key)
+}
+
+func childKey(key string) []byte {
+	return []byte("kid:" + key)
+}
+
+func rootKey(key string) []byte {
+	return []byte("rtf:" + key)
+}
+
+func deKey(key string) string {
+	return key[4:]
+}
+
+// encode returns the item encoded into []byte.
+func encode(item interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	err := enc.Encode(item)
+	return buf.Bytes(), err
+}
+
+// decode decodes the data buffer into the item.
+func decode(data []byte, item interface{}) error {
+	dec := json.NewDecoder(bytes.NewBuffer(data))
+	return dec.Decode(item)
+}
+
+// get retrives a single key from the database.
+func (d *DriveDB) get(key []byte, item interface{}) error {
+	data, err := d.db.Get(key, nil)
+	if err != nil {
+		return err
+	}
+	return decode(data, item)
+}
+
+// writeCheckpoint writes the checkpoint to the db, optionally using a batch.
+func (d *DriveDB) writeCheckpoint(batch *leveldb.Batch) error {
+	// TODO: figure out how to recover from the errors.
+	d.Lock()
+	cpt := d.cpt
+	d.Unlock()
+	bytes, err := encode(cpt)
+	if err != nil {
+		log.Printf("error encoding checkpoint: %v", err)
+		return err
+	}
+	if batch != nil {
+		batch.Put(internalKey("checkpoint"), bytes)
+		return nil
+	}
+	return d.db.Put(internalKey("checkpoint"), bytes, nil)
+}
+
+func (d *DriveDB) lastChangeId() int64 {
+	d.Lock()
+	defer d.Unlock()
+	return d.cpt.LastChangeID
+}
+
+func (d *DriveDB) setLastChangeId(id int64) {
+	d.Lock()
+	defer d.Unlock()
+	d.cpt.LastChangeID = id
+}
+
+// nextInode allocates a new inode number and updates the checkpoint.
+func (d *DriveDB) nextInode(batch *leveldb.Batch) (uint64, error) {
+	var inode uint64
+	d.Lock()
+	d.cpt.LastInode++
+	inode = d.cpt.LastInode
+	d.Unlock()
+	return inode, d.writeCheckpoint(batch)
+}
+
+// InodeForFileId returns a File's inode number, given its ID.
+// Allocates a new inode number if needed.
+func (d *DriveDB) InodeForFileId(fileId string) (uint64, error) {
+	return d.inodeForFileId(nil, fileId)
+}
+
+func (d *DriveDB) inodeForFileId(batch *leveldb.Batch, fileId string) (uint64, error) {
+	// TODO: singleflight
+	var inode uint64
+	err := d.get(fileIdToInodeKey(fileId), &inode)
+	if err == nil {
+		// return what we have.
+		return inode, nil
+	}
+
+	// allocate an inode number
+	inode, err = d.nextInode(batch)
+	if err != nil {
+		return 0, err
+	}
+
+	encodedInode, err := encode(inode)
+	if err != nil {
+		return 0, err
+	}
+
+	encodedFileId, err := encode(fileId)
+	if err != nil {
+		return 0, err
+	}
+
+	if batch == nil {
+		batch = new(leveldb.Batch)
+	}
+	// Create forward and reverse mappings.
+	batch.Put(fileIdToInodeKey(fileId), encodedInode)
+	batch.Put(inodeToFileIdKey(inode), encodedFileId)
+	err = d.db.Write(batch, nil)
+	if err != nil {
+		return 0, err
+	}
+	return inode, nil
 }
 
 // AllFileIds returns the IDs of all Google Drive file objects currently stored.
@@ -100,6 +252,30 @@ func (d *DriveDB) RootFileIds() ([]string, error) {
 	iter.Release()
 	d.iters.Done()
 	return ids, iter.Error()
+}
+
+// RootInodes returns the inodes of all Google Drive file objects that are
+// children of the root.
+func (d *DriveDB) RootInodes() ([]uint64, error) {
+	f, ok := d.lruCache.Get("rootInodes")
+	if ok {
+		return f.([]uint64), nil
+	}
+
+	var ids []uint64
+	fids, err := d.RootFileIds()
+	if err != nil {
+		return ids, err
+	}
+	for _, fid := range fids {
+		inode, err := d.InodeForFileId(fid)
+		if err == nil {
+			ids = append(ids, inode)
+		}
+	}
+
+	d.lruCache.Add("rootInodes", ids)
+	return ids, nil
 }
 
 // ChildFileIds returns the IDs of all Files that have parent refs to the given file.
@@ -139,109 +315,64 @@ func (d *DriveDB) FileById(fileId string) (*gdrive.File, error) {
 	return &res, nil
 }
 
-// InodeByFileId returns a File's inode number, given its ID.
-func (d *DriveDB) InodeByFileId(fileId string) (uint64, error) {
-	var inode uint64
-	f2ik := fileIdToInodeKey(fileId)
-	err := d.get(f2ik, &inode)
+// FileIdForInode returns the FileId associated with a given inode.
+func (d *DriveDB) FileIdForInode(inode uint64) (string, error) {
+	var fileId string
+	err := d.get(inodeToFileIdKey(inode), &fileId)
 	if err != nil {
-		return 0, err
-	}
-	return inode, nil
-}
-
-// FileIdByInode returns the FileId associated with a given inode.
-func (d *DriveDB) FileIdByInode(inode uint64) (string, error) {
-	f2ik := inodeToFileIdKey(inode)
-	data, err := d.db.Get(f2ik, nil)
-	if err != nil {
+		log.Printf("FileIdForInode: %v: %v", inode, err)
 		return "", err
 	}
-	return string(data), nil
+	return fileId, nil
 }
 
 // FileByInode
 func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
-	d.Lock()
-	defer d.Unlock()
-	if f, ok := d.files[inode]; ok {
-		return f, nil
+	f, ok := d.lruCache.Get(inode)
+	if ok {
+		return f.(*File), nil
 	}
-	return &File{}, fmt.Errorf("file not found")
-}
 
-// RootInodes returns the inodes of all Google Drive file objects that are
-// children of the root.
-func (d *DriveDB) RootInodes() []uint64 {
-	var ids []uint64
-	d.Lock()
-	defer d.Unlock()
-	for _, f := range d.files {
-		for _, p := range f.Parents {
-			if p.IsRoot {
-				ids = append(ids, f.Inode)
-			}
-		}
-	}
-	return ids
-}
-
-// Build the mapping of inode->File objects
-func (d *DriveDB) RebuildCache() error {
-	newCache := make(map[uint64]*File)
-	ids, err := d.AllFileIds()
+	fileId, err := d.FileIdForInode(inode)
 	if err != nil {
-		return fmt.Errorf("AllFileIds: %v", err)
+		return nil, err
 	}
-	for _, fileId := range ids {
-		driveFile, err := d.FileById(fileId)
-		if err != nil {
-			return fmt.Errorf("FileById(%v): %v", fileId, err)
-		}
-		file := File{driveFile, 0, nil, "", time.Time{}}
 
-		file.Inode, err = d.InodeByFileId(fileId)
-		if err != nil {
-			return fmt.Errorf("InodeByFileId(%v): %v", fileId, err)
-		}
-
-		childFileIds, err := d.ChildFileIds(fileId)
-		if err != nil {
-				return fmt.Errorf("ChildFileIds(%v): %v", fileId, err)
-		}
-		file.Children = make([]uint64, len(childFileIds))
-		for i, fileId := range childFileIds {
-			inode, err := d.InodeByFileId(fileId)
-			if err != nil {
-				return fmt.Errorf("FileById(%v): %v", fileId, err)
-			}
-			file.Children[i] = inode
-		}
-		newCache[file.Inode] = &file
+	gdriveFile, err := d.FileById(fileId)
+	if err != nil {
+		return nil, fmt.Errorf("unknown fileId %v: %v", fileId, err)
 	}
-	log.Printf("Updating cache with %d objects\n", len(newCache))
-	d.Lock()
-	d.files = newCache
-	d.Unlock()
-	return nil
+
+	file := File{gdriveFile, 0, nil, "", time.Time{}}
+	file.Inode, err = d.InodeForFileId(fileId)
+	if err != nil {
+		return nil, fmt.Errorf("no inode for %v: %v", fileId, err)
+	}
+
+	childFileIds, err := d.ChildFileIds(fileId)
+	if err != nil {
+		return nil, fmt.Errorf("error getting children of fileId %v: %v", fileId, err)
+	}
+	file.Children = make([]uint64, len(childFileIds))
+	for i, fileId := range childFileIds {
+		inode, err := d.InodeForFileId(fileId)
+		if err != nil {
+			return nil, fmt.Errorf("error getting inode of child %v: %v", fileId, err)
+		}
+		file.Children[i] = inode
+	}
+
+	d.lruCache.Add(inode, &file)
+	return &file, nil
 }
 
 // Refresh the file object of the given fileId
 func (d *DriveDB) Refresh(fileId string) error {
-  f, err := d.service.Files.Get(fileId).Do()
-  if err != nil {
-    return err
-  }
-	fkey := fileKey(fileId)
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	err = enc.Encode(f)
+	f, err := d.service.Files.Get(fileId).Do()
 	if err != nil {
-		return fmt.Errorf("error encoding file %v: %v", fileId, err)
+		return err
 	}
-	d.db.Put(fkey, buf.Bytes(), nil)
-	d.RebuildCache()
-	return nil
+	return d.updateFile(nil, f)
 }
 
 // The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
@@ -254,81 +385,120 @@ func (d *DriveDB) FreshDownloadUrl(f *File) string {
 		return f.cachedDownloadUrl
 	}
 	log.Printf("Refreshing DownloadUrl for %v", f.Title)
-  fresh, err := d.service.Files.Get(f.Id).Do()
-  if err != nil {
+	fresh, err := d.service.Files.Get(f.Id).Do()
+	if err != nil {
 		log.Printf("Failed to refresh DownloadUrl: %v", err)
-    return f.DownloadUrl
-  }
+		return f.DownloadUrl
+	}
 	f.cachedDownloadUrl = fresh.DownloadUrl
 	f.cachedDownloadUrlTime = time.Now()
 	log.Printf("Cached DownloadUrl for %v for %v", f.Title, downloadUrlLifetime)
 	return fresh.DownloadUrl
 }
 
-func (d *DriveDB) get(key []byte, item interface{}) error {
-	data, err := d.db.Get(key, nil)
+func (d *DriveDB) RemoveFile(f *gdrive.File) error {
+	if f == nil {
+		return nil
+	}
+	return d.removeFileById(nil, f.Id)
+}
+
+func (d *DriveDB) removeFileById(batch *leveldb.Batch, fileId string) error {
+	if batch == nil {
+		batch = new(leveldb.Batch)
+	}
+	// delete the file itself.
+	batch.Delete(fileKey(fileId))
+	// delete the inode mapping.
+	batch.Delete(fileIdToInodeKey(fileId))
+	// delete any "root object" ref
+	batch.Delete(rootKey(fileId))
+	// also delete all of its child refs
+	d.iters.Add(1)
+	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileId)), nil)
+	for iter.Next() {
+		batch.Delete(iter.Key())
+	}
+	iter.Release()
+	d.iters.Done()
+	// and delete any parents' refs to it.
+	f, err := d.FileById(fileId)
+	if err == nil && f != nil {
+		for _, pr := range f.Parents {
+			batch.Delete(childKey(pr.Id + ":" + fileId))
+		}
+	}
+	err = d.db.Write(batch, nil)
 	if err != nil {
 		return err
 	}
-	buf := bytes.NewBuffer(data)
-	dec := json.NewDecoder(buf)
-	return dec.Decode(item)
+	i, err := d.InodeForFileId(fileId)
+	if err == nil {
+		// remove from the cache
+		d.lruCache.Remove(i)
+	}
+	return nil
 }
 
-func internalKey(key string) []byte {
-	return []byte("int:" + key)
-}
+// updateFile commits a gdrive.File to levelDB, updating all mappings and allocating inodes if needed.
+func (d *DriveDB) updateFile(batch *leveldb.Batch, f *gdrive.File) error {
+	if f == nil {
+		return fmt.Errorf("cannot update nil File")
+	}
+	fileId := f.Id
+	bytes, err := encode(f)
+	if err != nil {
+		return fmt.Errorf("error encoding file %v: %v", fileId, err)
+	}
+	_, err = d.inodeForFileId(batch, fileId)
+	if err != nil {
+		return fmt.Errorf("error encoding file %v: %v", fileId, err)
+	}
 
-func fileIdToInodeKey(key string) []byte {
-	return []byte("f2i:" + key)
-}
+	b := batch
+	if b == nil {
+		b = new(leveldb.Batch)
+	}
 
-func inodeToFileIdKey(key uint64) []byte {
-	return []byte("i2f:" + fmt.Sprintf("%d", key))
-}
+	// Wipe the lru cache. We'll re-read elsewhere if needed.
+	inode, err := d.inodeForFileId(b, fileId)
+	if err != nil && inode > 0 {
+		d.lruCache.Remove(inode)
+	}
 
-func fileKey(key string) []byte {
-	return []byte("fid:" + key)
-}
+	// write the file itself.
+	b.Put(fileKey(fileId), bytes)
 
-func childKey(key string) []byte {
-	return []byte("kid:" + key)
-}
+	// Maintain child references
+	for _, pr := range f.Parents {
+		if pr.IsRoot {
+			b.Put(rootKey(fileId), []byte{}) // we care only about the key
+		} else {
+			b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
+		}
+	}
 
-func rootKey(key string) []byte {
-	return []byte("rtf:" + key)
-}
+	// Write now if no batch was supplied.
+	if batch == nil {
+		err := d.db.Write(batch, nil)
+		if err != nil {
+			return err
+		}
+	}
 
-func pathKey(key string) []byte {
-	return []byte("pth:" + key)
-}
-
-func deKey(key string) string {
-	return key[4:]
+	return nil
 }
 
 // sync is a background goroutine to sync drive data.
 func (d *DriveDB) sync() {
 	log.Printf("starting drive sync")
 
-	var (
-		cpt          CheckPoint
-		lastChangeID int64
-		buf          bytes.Buffer
-	)
-	enc := json.NewEncoder(&buf)
-
-	// Get saved checkpoint.
-	err := d.get(internalKey("checkpoint"), &cpt)
-	if err != nil {
-		cpt.LastInode = 1 // 1 is reserved for the root inode
-		log.Printf("error reading checkpoint: %v", err)
-	}
-
 	l := d.service.Changes.List().IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000)
-	if cpt.LastChangeID > 0 {
-		log.Printf("resuming sync from %v", cpt.LastChangeID)
-		l.StartChangeId(cpt.LastChangeID + 1)
+	lastChangeId := d.lastChangeId()
+
+	if lastChangeId > 0 {
+		log.Printf("resuming sync from %v", lastChangeId)
+		l.StartChangeId(lastChangeId + 1)
 	} else {
 		log.Printf("starting sync from scratch")
 	}
@@ -343,16 +513,13 @@ func (d *DriveDB) sync() {
 		}
 
 		// Already synced
-		if cpt.LastChangeID >= c.LargestChangeId {
-			d.RebuildCache()
+		if d.cpt.LastChangeID >= c.LargestChangeId {
 			d.synced.Broadcast()
 			d.pollSleep()
 			continue
 		}
 
 		if len(c.Items) == 0 {
-			d.RebuildCache()
-			d.synced.Broadcast()
 			d.pollSleep()
 			continue
 		}
@@ -360,83 +527,23 @@ func (d *DriveDB) sync() {
 		batch := new(leveldb.Batch)
 
 		for _, i := range c.Items {
-			lastChangeID = i.Id
-			fileId := i.FileId
-			fkey := fileKey(fileId)
-			f2inodekey := fileIdToInodeKey(fileId)
-			ckey := childKey(fileId)
-
-			// Delete file
+			// Wipe the lru cache. We'll re-read elsewhere if needed.
+			inode, err := d.inodeForFileId(batch, i.FileId)
+			if err != nil && inode > 0 {
+				d.lruCache.Remove(inode)
+			}
+			// Update leveldb.
 			if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
-				batch.Delete(fkey)
-				batch.Delete(f2inodekey)
-				// delete any "root object" ref
-				batch.Delete(rootKey(fileId))
-				// also delete all of its child refs
-				d.iters.Add(1)
-				iter := d.db.NewIterator(util.BytesPrefix(ckey), nil)
-				for iter.Next() {
-					batch.Delete(iter.Key())
-				}
-				iter.Release()
-				d.iters.Done()
-				// and delete any parents' refs to it.
-				f, err := d.FileById(fileId)
-				if err == nil && f != nil {
-					for _, pr := range f.Parents {
-						batch.Delete(childKey(pr.Id + ":" + fileId))
-					}
-				}
-				continue
+				d.removeFileById(batch, i.FileId)
+			} else {
+				d.updateFile(batch, i.File)
 			}
-
-			// Add/Update file
-			buf.Reset()
-			err := enc.Encode(i.File)
-			if err != nil {
-				log.Printf("error encoding file %v: %v", fileId, err)
-				continue
-			}
-			batch.Put(fkey, buf.Bytes())
-
-			// Check for, and allocate an inode number if needed.
-			found, err := d.db.Has(f2inodekey, nil)
-			if err == nil && found {
-				continue
-			}
-			cpt.LastInode++
-			buf.Reset()
-			err = enc.Encode(cpt.LastInode)
-			if err != nil {
-				log.Printf("error encoding inode %v for %v: %v", cpt.LastInode, fileId, err)
-				continue
-			}
-			batch.Put(f2inodekey, buf.Bytes())
-			// Store the opposite lookup of inode -> fileid
-			batch.Put(inodeToFileIdKey(cpt.LastInode), []byte(fileId))
-
-			// Child references
-			for _, pr := range i.File.Parents {
-				if pr.IsRoot {
-					batch.Put(rootKey(fileId), []byte{}) // we care only about the key
-				} else {
-					batch.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
-				}
-			}
+			// Update the checkpoint.
+			d.setLastChangeId(i.Id)
 		}
 
-		cpt.LastChangeID = lastChangeID
-		log.Printf("%d changes; new checkpoint (change, inode): %v", len(c.Items), cpt)
-		buf.Reset()
-		err = enc.Encode(cpt)
-		if err != nil {
-			// TODO: figure out how to recover from the error.
-			log.Printf("error encoding checkpoint: %v", err)
-			batch.Reset()
-			d.pollSleep()
-			continue
-		}
-		batch.Put(internalKey("checkpoint"), buf.Bytes())
+		_ = d.writeCheckpoint(batch)
+		d.lruCache.Remove("rootInodes")
 
 		err = d.db.Write(batch, nil)
 		if err != nil {
@@ -453,8 +560,7 @@ func (d *DriveDB) sync() {
 		}
 
 		// Signal we're synced, if we are.
-		if cpt.LastChangeID >= c.LargestChangeId {
-			d.RebuildCache()
+		if d.lastChangeId() >= c.LargestChangeId {
 			d.synced.Broadcast()
 			d.pollSleep()
 		}
@@ -462,7 +568,7 @@ func (d *DriveDB) sync() {
 		// Start at the new change ID next time
 		l = d.service.Changes.List().
 			IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000).
-			StartChangeId(cpt.LastChangeID + 1)
+			StartChangeId(d.lastChangeId() + 1)
 
 	}
 }

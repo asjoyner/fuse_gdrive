@@ -23,11 +23,11 @@ var driveFolderMimeType string = "application/vnd.google-apps.folder"
 type serveConn struct {
 	db         *drive_db.DriveDB
 	driveCache cache.Reader
-	launch  time.Time
-	rootId  string // the fileId of the root
-	uid     uint32 // uid of the user who mounted the FS
-	gid     uint32 // gid of the user who mounted the FS
-	conn    *fuse.Conn
+	launch     time.Time
+	rootId     string // the fileId of the root
+	uid        uint32 // uid of the user who mounted the FS
+	gid        uint32 // gid of the user who mounted the FS
+	conn       *fuse.Conn
 }
 
 // FuseServe receives and dispatches Requests from the kernel
@@ -106,7 +106,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 		var childInodes []uint64
 		var err error
 		if inode == 1 {
-			childInodes = sc.db.RootInodes()
+			childInodes, err = sc.db.RootInodes()
 			if err != nil {
 				fuse.Debug(fmt.Sprintf("RootInodes lookup failure: %v", err))
 				req.RespondError(fuse.ENOENT)
@@ -157,7 +157,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.OpenRequest:
 		/* // TODO: Remove Me.  The kernel should never ask to open an inode that
 		* it hasn't already called Lookup on... so we don't need this check...
-		if _, err := fileId, err := sc.db.FileIdByInode(inode); err != nil {
+		if _, err := fileId, err := sc.db.FileIdForInode(inode); err != nil {
 			req.RespondError(fuse.ENOENT)
 			break
 		}
@@ -202,7 +202,7 @@ func (sc *serveConn) ReadDir(inode uint64) ([]byte, error) {
 	var children []uint64
 	var err error
 	if inode == 1 {
-		children = sc.db.RootInodes()
+		children, err = sc.db.RootInodes()
 		if err != nil {
 			return nil, fmt.Errorf("RootInodes: %v", err)
 		}
@@ -239,7 +239,7 @@ func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) 
 		return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
 	}
 	url := sc.db.FreshDownloadUrl(f)
-	if url == "" {  // If there is no url, the file has no body
+	if url == "" { // If there is no url, the file has no body
 		return nil, io.EOF
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, offset, size)
