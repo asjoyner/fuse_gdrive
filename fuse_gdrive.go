@@ -166,6 +166,7 @@ func main() {
 
 	sc := serveConn{db: db,
 		driveCache: driveCache,
+		service: service,
 		//handles:    make(map[fuse.HandleID]string),
 		launch: time.Unix(1335225600, 0),
 		uid:    uid,

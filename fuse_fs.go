@@ -12,6 +12,8 @@ import (
 	_ "bazil.org/fuse/fs/fstestutil"
 	"bazil.org/fuse/fuseutil"
 
+	drive "code.google.com/p/google-api-go-client/drive/v2"
+
 	"github.com/asjoyner/fuse_gdrive/cache"
 	"github.com/asjoyner/fuse_gdrive/drive_db"
 )
@@ -22,6 +24,7 @@ var driveFolderMimeType string = "application/vnd.google-apps.folder"
 // serveConn holds the state about the fuse connection
 type serveConn struct {
 	db         *drive_db.DriveDB
+	service		 *drive.Service
 	driveCache cache.Reader
 	launch     time.Time
 	rootId     string // the fileId of the root
@@ -184,6 +187,10 @@ func (sc *serveConn) serve(req fuse.Request) {
 			req.Respond(resp)
 		}
 
+	// Return MkdirResponse (it's LookupResponse, essentially) of new dir
+	case *fuse.MkdirRequest:
+		sc.Mkdir(req)
+
 	// Ack that the kernel has forgotten the metadata about an inode
 	case *fuse.FlushRequest:
 		req.Respond()
@@ -279,23 +286,36 @@ func (sc *serveConn) AttrFromFile(file drive_db.File) fuse.Attr {
 	return attr
 }
 
-/*
 func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	// TODO: if allow_other, require uid == invoking uid to allow writes
-	p := []*drive.ParentReference{&drive.ParentReference{Id: n.Id}}
-	f := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
-	f, err := service.Files.Insert(f).Do()
+	pId, err := sc.db.FileIdForInode(uint64(req.Header.Node))
 	if err != nil {
-		return &Node{}, fmt.Errorf("Insert failed: %v", err)
+		debug.Printf("failed to get parent fileid: %v", err)
+		req.RespondError(fuse.EIO)
 	}
-	node, err := nodeFromFile(f, 0)
+	p := []*drive.ParentReference{&drive.ParentReference{Id: pId}}
+	file := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
+	file, err = sc.service.Files.Insert(file).Do()
 	if err != nil {
-		return &Node{}, fmt.Errorf("created dir, but failed to parse response: %v", err)
+		debug.Printf("Insert failed: %v", err)
+		req.RespondError(fuse.EIO)
 	}
-	n.Children[node.Title] = node
-	return n, nil
+	f, err := sc.db.UpdateFile(nil, file)
+	if err != nil {
+		debug.Printf("failed to update levelDB for %v: %v", f.Id, err)
+		// The write has happened to drive, but we can't update the kernel yet.
+		// The Changes API will update Fuse, and when the kernel metadata for
+		// the parent directory expires, the new dir will become visible.
+		req.RespondError(fuse.EIO)
+	}
+	resp := &fuse.MkdirResponse{}
+	resp.Node = fuse.NodeID(f.Inode)
+	resp.EntryValid = *driveMetadataLatency
+	resp.AttrValid = *driveMetadataLatency
+	resp.Attr = sc.AttrFromFile(*f)
+	fuse.Debug(fmt.Sprintf("Mkdir(%v): %+v", req.Name, f))
+	req.Respond(resp)
 }
-*/
 
 // TODO: Implement remove (doubles as rmdir)
 /*

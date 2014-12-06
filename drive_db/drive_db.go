@@ -367,12 +367,12 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 }
 
 // Refresh the file object of the given fileId
-func (d *DriveDB) Refresh(fileId string) error {
+func (d *DriveDB) Refresh(fileId string) (*File, error) {
 	f, err := d.service.Files.Get(fileId).Do()
 	if err != nil {
-		return err
+		return &File{}, err
 	}
-	return d.updateFile(nil, f)
+	return d.UpdateFile(nil, f)
 }
 
 // The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
@@ -440,19 +440,19 @@ func (d *DriveDB) removeFileById(batch *leveldb.Batch, fileId string) error {
 	return nil
 }
 
-// updateFile commits a gdrive.File to levelDB, updating all mappings and allocating inodes if needed.
-func (d *DriveDB) updateFile(batch *leveldb.Batch, f *gdrive.File) error {
+// UpdateFile commits a gdrive.File to levelDB, updating all mappings and allocating inodes if needed.
+func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error) {
 	if f == nil {
-		return fmt.Errorf("cannot update nil File")
+		return &File{}, fmt.Errorf("cannot update nil File")
 	}
 	fileId := f.Id
 	bytes, err := encode(f)
 	if err != nil {
-		return fmt.Errorf("error encoding file %v: %v", fileId, err)
+		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
 	_, err = d.inodeForFileId(batch, fileId)
 	if err != nil {
-		return fmt.Errorf("error encoding file %v: %v", fileId, err)
+		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
 
 	b := batch
@@ -482,11 +482,12 @@ func (d *DriveDB) updateFile(batch *leveldb.Batch, f *gdrive.File) error {
 	if batch == nil {
 		err := d.db.Write(batch, nil)
 		if err != nil {
-			return err
+			return &File{}, err
 		}
 	}
 
-	return nil
+	file := File{f, inode, nil, "", time.Time{}}
+	return &file, nil
 }
 
 // sync is a background goroutine to sync drive data.
@@ -536,7 +537,8 @@ func (d *DriveDB) sync() {
 			if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
 				d.removeFileById(batch, i.FileId)
 			} else {
-				d.updateFile(batch, i.File)
+				d.UpdateFile(batch, i.File)
+				// TODO: Handle error from UpdateFile
 			}
 			// Update the checkpoint.
 			d.setLastChangeId(i.Id)
