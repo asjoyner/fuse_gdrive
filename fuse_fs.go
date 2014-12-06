@@ -122,10 +122,11 @@ func (sc *serveConn) serve(req fuse.Request) {
 				req.RespondError(fuse.ENOENT)
 				break
 			}
-			for _, inode := range file.Children {
-				child, err := sc.db.FileByInode(inode)
+			for _, cInode := range file.Children {
+				// TODO: optimize this to not call FileByInode twice for non-root children
+				child, err := sc.db.FileByInode(cInode)
 				if err != nil {
-					fuse.Debug(fmt.Sprintf("child inode %v lookup failure: %v", inode, err))
+					fuse.Debug(fmt.Sprintf("child inode %v lookup failure: %v", cInode, err))
 					req.RespondError(fuse.ENOENT)
 					break
 				}
@@ -133,24 +134,29 @@ func (sc *serveConn) serve(req fuse.Request) {
 			}
 		}
 
-		for _, inode := range childInodes {
-			cf, err := sc.db.FileByInode(inode)
+		var found bool
+		for _, cInode := range childInodes {
+			cf, err := sc.db.FileByInode(cInode)
 			if err != nil {
-				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
+				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", cInode, err))
 				req.RespondError(fuse.EIO)
 				break
 			}
 			if cf.Title == req.Name {
-				resp.Node = fuse.NodeID(inode)
+				resp.Node = fuse.NodeID(cInode)
 				resp.EntryValid = *driveMetadataLatency
 				resp.AttrValid = *driveMetadataLatency
 				resp.Attr = sc.AttrFromFile(*cf)
-				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
+				fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
 				req.Respond(resp)
+				found = true
 				break
 			}
 		}
-		req.RespondError(fuse.ENOENT)
+		if !found {
+			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): ENOENT", req.Name, inode))
+			req.RespondError(fuse.ENOENT)
+		}
 
 	// Ack that the kernel has forgotten the metadata about an inode
 	case *fuse.ForgetRequest:
@@ -288,7 +294,8 @@ func (sc *serveConn) AttrFromFile(file drive_db.File) fuse.Attr {
 
 func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	// TODO: if allow_other, require uid == invoking uid to allow writes
-	pId, err := sc.db.FileIdForInode(uint64(req.Header.Node))
+	pInode := uint64(req.Header.Node)
+	pId, err := sc.db.FileIdForInode(pInode)
 	if err != nil {
 		debug.Printf("failed to get parent fileid: %v", err)
 		req.RespondError(fuse.EIO)
@@ -300,6 +307,7 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 		debug.Printf("Insert failed: %v", err)
 		req.RespondError(fuse.EIO)
 	}
+	debug.Printf("Child of %v created in drive: %+v", file.Parents[0].Id, file)
 	f, err := sc.db.UpdateFile(nil, file)
 	if err != nil {
 		debug.Printf("failed to update levelDB for %v: %v", f.Id, err)
@@ -308,6 +316,7 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 		// the parent directory expires, the new dir will become visible.
 		req.RespondError(fuse.EIO)
 	}
+	sc.db.FlushCachedInode(pInode)
 	resp := &fuse.MkdirResponse{}
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency

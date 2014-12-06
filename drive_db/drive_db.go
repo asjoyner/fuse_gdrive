@@ -330,6 +330,7 @@ func (d *DriveDB) FileIdForInode(inode uint64) (string, error) {
 func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	f, ok := d.lruCache.Get(inode)
 	if ok {
+		fmt.Println("Returning cached inode %v", inode)
 		return f.(*File), nil
 	}
 
@@ -363,6 +364,7 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	}
 
 	d.lruCache.Add(inode, &file)
+	fmt.Println("Returning fresh inode %v", inode)
 	return &file, nil
 }
 
@@ -450,10 +452,6 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	if err != nil {
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
-	_, err = d.inodeForFileId(batch, fileId)
-	if err != nil {
-		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
-	}
 
 	b := batch
 	if b == nil {
@@ -462,7 +460,10 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 
 	// Wipe the lru cache. We'll re-read elsewhere if needed.
 	inode, err := d.inodeForFileId(b, fileId)
-	if err != nil && inode > 0 {
+	if err != nil {
+		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
+	}
+	if err == nil && inode > 0 {
 		d.lruCache.Remove(inode)
 	}
 
@@ -488,6 +489,10 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 
 	file := File{f, inode, nil, "", time.Time{}}
 	return &file, nil
+}
+
+func (d *DriveDB) FlushCachedInode(inode uint64) {
+	d.lruCache.Remove(inode)
 }
 
 // sync is a background goroutine to sync drive data.
