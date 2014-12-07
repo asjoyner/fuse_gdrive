@@ -21,6 +21,20 @@ import (
 
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
 
+// encode returns the item encoded into []byte.
+func encode(item interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	err := enc.Encode(item)
+	return buf.Bytes(), err
+}
+
+// decode decodes the data buffer into the item.
+func decode(data []byte, item interface{}) error {
+	dec := json.NewDecoder(bytes.NewBuffer(data))
+	return dec.Decode(item)
+}
+
 type File struct {
 	*gdrive.File
 	Inode                 uint64
@@ -42,6 +56,7 @@ type DriveDB struct {
 	synced   *sync.Cond
 	iters    sync.WaitGroup
 	cpt      CheckPoint
+	changes  chan *gdrive.ChangeList
 	lruCache *lru.Cache // inode to *File
 }
 
@@ -70,6 +85,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string) (*DriveDB, error) {
 		service:  svc,
 		db:       db,
 		lruCache: lru.New(int(1000)), // make the value tunable
+		changes:  make(chan *gdrive.ChangeList, 200),
 	}
 
 	// Get saved checkpoint.
@@ -87,6 +103,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string) (*DriveDB, error) {
 	d.synced = sync.NewCond(&d.syncmu)
 
 	go d.sync()
+	go d.readChanges()
 	return d, nil
 }
 
@@ -117,20 +134,6 @@ func rootKey(key string) []byte {
 
 func deKey(key string) string {
 	return key[4:]
-}
-
-// encode returns the item encoded into []byte.
-func encode(item interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	err := enc.Encode(item)
-	return buf.Bytes(), err
-}
-
-// decode decodes the data buffer into the item.
-func decode(data []byte, item interface{}) error {
-	dec := json.NewDecoder(bytes.NewBuffer(data))
-	return dec.Decode(item)
 }
 
 // get retrives a single key from the database.
@@ -495,22 +498,16 @@ func (d *DriveDB) FlushCachedInode(inode uint64) {
 	d.lruCache.Remove(inode)
 }
 
-// sync is a background goroutine to sync drive data.
-func (d *DriveDB) sync() {
-	log.Printf("starting drive sync")
-
+// readChanges is a background goroutine to poll Drive for changes.
+func (d *DriveDB) readChanges() {
 	l := d.service.Changes.List().IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000)
 	lastChangeId := d.lastChangeId()
 
 	if lastChangeId > 0 {
-		log.Printf("resuming sync from %v", lastChangeId)
 		l.StartChangeId(lastChangeId + 1)
-	} else {
-		log.Printf("starting sync from scratch")
 	}
 
 	for {
-		log.Printf("sync loop")
 		c, err := l.Do()
 		if err != nil {
 			log.Printf("sync error: %v", err)
@@ -518,71 +515,76 @@ func (d *DriveDB) sync() {
 			continue
 		}
 
-		// Already synced
-		if d.cpt.LastChangeID >= c.LargestChangeId {
-			d.synced.Broadcast()
-			d.pollSleep()
-			continue
-		}
-
-		if len(c.Items) == 0 {
-			d.pollSleep()
-			continue
-		}
-
-		batch := new(leveldb.Batch)
-
-		for _, i := range c.Items {
-			// Wipe the lru cache. We'll re-read elsewhere if needed.
-			inode, err := d.inodeForFileId(batch, i.FileId)
-			if err != nil && inode > 0 {
-				d.lruCache.Remove(inode)
-			}
-			// Update leveldb.
-			if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
-				d.removeFileById(batch, i.FileId)
-			} else {
-				d.UpdateFile(batch, i.File)
-				// TODO: Handle error from UpdateFile
-			}
-			// Update the checkpoint.
-			d.setLastChangeId(i.Id)
-		}
-
-		_ = d.writeCheckpoint(batch)
-		d.lruCache.Remove("rootInodes")
-
-		err = d.db.Write(batch, nil)
-		if err != nil {
-			// TODO: figure out how to recover from the error.
-			log.Printf("error writing to db: %v", err)
-			d.pollSleep()
-			continue
-		}
-
-		// Get the next page.
-		if c.NextPageToken != "" {
-			l.PageToken(c.NextPageToken)
-			continue
-		}
-
-		// Signal we're synced, if we are.
+		// Notify that we're already synced
 		if d.lastChangeId() >= c.LargestChangeId {
 			d.synced.Broadcast()
-			d.pollSleep()
 		}
 
-		// Start at the new change ID next time
-		l = d.service.Changes.List().
-			IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000).
-			StartChangeId(d.lastChangeId() + 1)
+		// If we read zero items, there's no work to do. And we're probably synced.
+		if len(c.Items) == 0 {
+			d.synced.Broadcast()
+			d.pollSleep()
+			continue
+		}
 
+		d.changes <- c
+
+		lastChangeId := c.Items[len(c.Items)-1].Id
+
+		// Go to the next page, or next syncid.
+		if c.NextPageToken != "" {
+			l.PageToken(c.NextPageToken)
+		} else {
+			l = d.service.Changes.List().
+				IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000).
+				StartChangeId(lastChangeId + 1)
+		}
+	}
+}
+
+// sync is a background goroutine to sync drive data.
+func (d *DriveDB) sync() {
+	var c *gdrive.ChangeList
+	batch := new(leveldb.Batch)
+	for {
+		select {
+		case c = <-d.changes:
+			log.Printf("processing %v/%v, %v changes", d.lastChangeId(), c.LargestChangeId, len(c.Items))
+			for _, i := range c.Items {
+				// Wipe the lru cache. We'll re-read elsewhere if needed.
+				inode, err := d.inodeForFileId(batch, i.FileId)
+				if err != nil && inode > 0 {
+					d.lruCache.Remove(inode)
+				}
+				// Update leveldb.
+				if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
+					d.removeFileById(batch, i.FileId)
+				} else {
+					d.UpdateFile(batch, i.File)
+				}
+				// Update the checkpoint.
+				d.setLastChangeId(i.Id)
+				_ = d.writeCheckpoint(batch)
+				// Commit
+				err = d.db.Write(batch, nil)
+				batch.Reset()
+				if err != nil {
+					// TODO: figure out how to recover from the error.
+					log.Printf("error writing to db: %v", err)
+				}
+			}
+			d.lruCache.Remove("rootInodes")
+			// Signal we're synced, if we are.
+			if d.lastChangeId() >= c.LargestChangeId {
+				d.synced.Broadcast()
+			}
+		}
 	}
 }
 
 func (d *DriveDB) pollSleep() {
 	// TODO: make this an option or parameter.
-	time.Sleep(time.Minute)
+	time.Sleep(15 * time.Second)
 }
 
 func (d *DriveDB) WaitUntilSynced() {
