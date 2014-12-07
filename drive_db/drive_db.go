@@ -50,18 +50,19 @@ type CheckPoint struct {
 
 type DriveDB struct {
 	sync.Mutex
-	service  *gdrive.Service
-	db       *leveldb.DB
-	syncmu   sync.Mutex
-	synced   *sync.Cond
-	iters    sync.WaitGroup
-	cpt      CheckPoint
-	changes  chan *gdrive.ChangeList
-	lruCache *lru.Cache // inode to *File
+	service      *gdrive.Service
+	db           *leveldb.DB
+	syncmu       sync.Mutex
+	synced       *sync.Cond
+	iters        sync.WaitGroup
+	cpt          CheckPoint
+	changes      chan *gdrive.ChangeList
+	lruCache     *lru.Cache // inode to *File
+	pollInterval time.Duration
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
-func NewDriveDB(svc *gdrive.Service, filepath string) (*DriveDB, error) {
+func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration) (*DriveDB, error) {
 	o := &opt.Options{
 		Filter: filter.NewBloomFilter(10),
 		Strict: opt.StrictAll,
@@ -82,10 +83,11 @@ func NewDriveDB(svc *gdrive.Service, filepath string) (*DriveDB, error) {
 	}
 
 	d := &DriveDB{
-		service:  svc,
-		db:       db,
-		lruCache: lru.New(int(1000)), // make the value tunable
-		changes:  make(chan *gdrive.ChangeList, 200),
+		service:      svc,
+		db:           db,
+		lruCache:     lru.New(int(1000)), // make the value tunable
+		changes:      make(chan *gdrive.ChangeList, 200),
+		pollInterval: pollInterval,
 	}
 
 	// Get saved checkpoint.
@@ -547,44 +549,42 @@ func (d *DriveDB) sync() {
 	var c *gdrive.ChangeList
 	batch := new(leveldb.Batch)
 	for {
-		select {
-		case c = <-d.changes:
-			log.Printf("processing %v/%v, %v changes", d.lastChangeId(), c.LargestChangeId, len(c.Items))
-			for _, i := range c.Items {
-				// Wipe the lru cache. We'll re-read elsewhere if needed.
-				inode, err := d.inodeForFileId(batch, i.FileId)
-				if err != nil && inode > 0 {
-					d.lruCache.Remove(inode)
-				}
-				// Update leveldb.
-				if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
-					d.removeFileById(batch, i.FileId)
-				} else {
-					d.UpdateFile(batch, i.File)
-				}
-				// Update the checkpoint.
-				d.setLastChangeId(i.Id)
-				_ = d.writeCheckpoint(batch)
-				// Commit
-				err = d.db.Write(batch, nil)
-				batch.Reset()
-				if err != nil {
-					// TODO: figure out how to recover from the error.
-					log.Printf("error writing to db: %v", err)
-				}
+		c = <-d.changes
+		log.Printf("processing %v/%v, %v changes", d.lastChangeId(), c.LargestChangeId, len(c.Items))
+		for _, i := range c.Items {
+			// Wipe the lru cache. We'll re-read elsewhere if needed.
+			inode, err := d.inodeForFileId(batch, i.FileId)
+			if err != nil && inode > 0 {
+				d.lruCache.Remove(inode)
 			}
-			d.lruCache.Remove("rootInodes")
-			// Signal we're synced, if we are.
-			if d.lastChangeId() >= c.LargestChangeId {
-				d.synced.Broadcast()
+			// Update leveldb.
+			if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
+				d.removeFileById(batch, i.FileId)
+			} else {
+				d.UpdateFile(batch, i.File)
 			}
+			// Update the checkpoint.
+			d.setLastChangeId(i.Id)
+			_ = d.writeCheckpoint(batch)
+			// Commit
+			err = d.db.Write(batch, nil)
+			batch.Reset()
+			if err != nil {
+				// TODO: figure out how to recover from the error.
+				log.Printf("error writing to db: %v", err)
+			}
+		}
+		d.lruCache.Remove("rootInodes")
+		// Signal we're synced, if we are.
+		if d.lastChangeId() >= c.LargestChangeId {
+			d.synced.Broadcast()
 		}
 	}
 }
 
 func (d *DriveDB) pollSleep() {
 	// TODO: make this an option or parameter.
-	time.Sleep(15 * time.Second)
+	time.Sleep(d.pollInterval)
 }
 
 func (d *DriveDB) WaitUntilSynced() {

@@ -123,7 +123,7 @@ func main() {
 	// Create and start the drive metadata syncer.
 	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
 	log.Printf("using drivedb: %v", dbpath)
-	db, err := drive_db.NewDriveDB(service, dbpath)
+	db, err := drive_db.NewDriveDB(service, dbpath, *driveMetadataLatency)
 	if err != nil {
 		log.Fatalf("could not open leveldb: %v", err)
 	}
@@ -166,7 +166,7 @@ func main() {
 
 	sc := serveConn{db: db,
 		driveCache: driveCache,
-		service: service,
+		service:    service,
 		//handles:    make(map[fuse.HandleID]string),
 		launch: time.Unix(1335225600, 0),
 		uid:    uid,

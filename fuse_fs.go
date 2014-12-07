@@ -24,7 +24,7 @@ var driveFolderMimeType string = "application/vnd.google-apps.folder"
 // serveConn holds the state about the fuse connection
 type serveConn struct {
 	db         *drive_db.DriveDB
-	service		 *drive.Service
+	service    *drive.Service
 	driveCache cache.Reader
 	launch     time.Time
 	rootId     string // the fileId of the root
