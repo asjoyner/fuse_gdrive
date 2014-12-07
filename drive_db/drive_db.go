@@ -333,7 +333,7 @@ func (d *DriveDB) FileIdForInode(inode uint64) (string, error) {
 func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	f, ok := d.lruCache.Get(inode)
 	if ok {
-		fmt.Println("Returning cached inode %v", inode)
+		//fmt.Println("Returning cached inode %v", inode)
 		return f.(*File), nil
 	}
 
@@ -367,7 +367,7 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	}
 
 	d.lruCache.Add(inode, &file)
-	fmt.Println("Returning fresh inode %v", inode)
+	//fmt.Println("Returning fresh inode %v", inode)
 	return &file, nil
 }
 
