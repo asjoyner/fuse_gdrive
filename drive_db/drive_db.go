@@ -5,6 +5,7 @@ package drive_db
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"sync"
@@ -20,6 +21,16 @@ import (
 )
 
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
+
+var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package")
+
+type debugging bool
+var debug debugging
+func (d debugging) Printf(format string, args ...interface{}) {
+	if d {
+		log.Printf(format, args...)
+	}
+}
 
 // encode returns the item encoded into []byte.
 func encode(item interface{}) ([]byte, error) {
@@ -63,6 +74,10 @@ type DriveDB struct {
 
 // NewDriveDB creates a new DriveDB and starts syncing.
 func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration) (*DriveDB, error) {
+	if *debugDriveDB {
+		debug = true
+	}
+
 	o := &opt.Options{
 		Filter: filter.NewBloomFilter(10),
 		Strict: opt.StrictAll,
@@ -100,7 +115,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 	if err != nil {
 		return nil, fmt.Errorf("could not write checkpoint: %v", err)
 	}
-	log.Printf("Checkpoint: %v", d.cpt)
+	debug.Printf("Recovered from checkpoint: %+v", d.cpt)
 
 	d.synced = sync.NewCond(&d.syncmu)
 
@@ -510,15 +525,18 @@ func (d *DriveDB) readChanges() {
 	}
 
 	for {
+		debug.Printf("Querying Google Drive for changes from change %d.", lastChangeId+1)
 		c, err := l.Do()
 		if err != nil {
 			log.Printf("sync error: %v", err)
 			d.pollSleep()
 			continue
 		}
+		debug.Printf("Response from Drive contains %d changes of %d", len(c.Items), c.LargestChangeId)
 
 		// Notify that we're already synced
 		if d.lastChangeId() >= c.LargestChangeId {
+			debug.Printf("Largest Change from drive is in checkpoint: %d", c.LargestChangeId)
 			d.synced.Broadcast()
 		}
 
