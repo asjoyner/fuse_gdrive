@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"sync"
 	"time"
@@ -23,9 +24,12 @@ import (
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
 
 var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package")
+var logChanges = flag.Bool("logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 
 type debugging bool
+
 var debug debugging
+
 func (d debugging) Printf(format string, args ...interface{}) {
 	if d {
 		log.Printf(format, args...)
@@ -70,6 +74,7 @@ type DriveDB struct {
 	changes      chan *gdrive.ChangeList
 	lruCache     *lru.Cache // inode to *File
 	pollInterval time.Duration
+	dbpath       string
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -103,6 +108,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		lruCache:     lru.New(int(1000)), // make the value tunable
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
+		dbpath:       filepath,
 	}
 
 	// Get saved checkpoint.
@@ -524,7 +530,9 @@ func (d *DriveDB) readChanges() {
 		l.StartChangeId(lastChangeId + 1)
 	}
 
+	var filenum int
 	for {
+		filenum++
 		debug.Printf("Querying Google Drive for changes from change %d.", lastChangeId+1)
 		c, err := l.Do()
 		if err != nil {
@@ -533,6 +541,11 @@ func (d *DriveDB) readChanges() {
 			continue
 		}
 		debug.Printf("Response from Drive contains %d changes of %d", len(c.Items), c.LargestChangeId)
+		if *logChanges {
+			filename := fmt.Sprintf("%s/changes.out.%d", d.dbpath, filenum)
+			data, _ := encode(c)
+			ioutil.WriteFile(filename, data, 0700)
+		}
 
 		// Notify that we're already synced
 		if d.lastChangeId() >= c.LargestChangeId {
