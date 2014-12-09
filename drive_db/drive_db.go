@@ -164,7 +164,6 @@ func (d *DriveDB) get(key []byte, item interface{}) error {
 
 // writeCheckpoint writes the checkpoint to the db, optionally using a batch.
 func (d *DriveDB) writeCheckpoint(batch *leveldb.Batch) error {
-	// TODO: figure out how to recover from the errors.
 	d.Lock()
 	cpt := d.cpt
 	d.Unlock()
@@ -534,22 +533,14 @@ func (d *DriveDB) readChanges() {
 		}
 		debug.Printf("Response from Drive contains %d changes of %d", len(c.Items), c.LargestChangeId)
 
-		// Notify that we're already synced
-		if d.lastChangeId() >= c.LargestChangeId {
-			debug.Printf("Largest Change from drive is in checkpoint: %d", c.LargestChangeId)
-			d.synced.Broadcast()
-		}
-
-		// If we read zero items, there's no work to do. And we're probably synced.
 		if len(c.Items) == 0 {
-			d.synced.Broadcast()
+			lastChangeId := c.Items[len(c.Items)-1].Id
 			d.pollSleep()
 			continue
 		}
 
+		// Process the changelist.
 		d.changes <- c
-
-		lastChangeId := c.Items[len(c.Items)-1].Id
 
 		// Go to the next page, or next syncid.
 		if c.NextPageToken != "" {
@@ -562,41 +553,65 @@ func (d *DriveDB) readChanges() {
 	}
 }
 
-// sync is a background goroutine to sync drive data.
-func (d *DriveDB) sync() {
-	var c *gdrive.ChangeList
-	batch := new(leveldb.Batch)
-	for {
-		c = <-d.changes
-		log.Printf("processing %v/%v, %v changes", d.lastChangeId(), c.LargestChangeId, len(c.Items))
-		for _, i := range c.Items {
-			// Wipe the lru cache. We'll re-read elsewhere if needed.
-			inode, err := d.inodeForFileId(batch, i.FileId)
-			if err != nil && inode > 0 {
-				d.lruCache.Remove(inode)
-			}
-			// Update leveldb.
-			if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
-				d.removeFileById(batch, i.FileId)
-			} else {
-				d.UpdateFile(batch, i.File)
-			}
-			// Update the checkpoint.
-			d.setLastChangeId(i.Id)
-			_ = d.writeCheckpoint(batch)
-			// Commit
-			err = d.db.Write(batch, nil)
-			batch.Reset()
-			if err != nil {
-				// TODO: figure out how to recover from the error.
-				log.Printf("error writing to db: %v", err)
-			}
-		}
-		d.lruCache.Remove("rootInodes")
-		// Signal we're synced, if we are.
+// processChange applies a ChangeList to the database.
+func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
+	if c == nil {
+		return nil
+	}
+
+	// If we read zero items, there's no work to do, and we're probably synced.
+	if len(c.Items) == 0 {
 		if d.lastChangeId() >= c.LargestChangeId {
 			d.synced.Broadcast()
 		}
+		return nil
+	}
+
+	log.Printf("processing %v/%v, %v changes", d.lastChangeId(), c.LargestChangeId, len(c.Items))
+
+	batch := new(leveldb.Batch)
+	for _, i := range c.Items {
+		batch.Reset()
+		// Wipe the lru cache for this file. We'll re-read elsewhere if needed.
+		inode, err := d.inodeForFileId(batch, i.FileId)
+		if err != nil && inode > 0 {
+			d.lruCache.Remove(inode)
+		}
+		// Update leveldb.
+		// TODO: don't delete trashed/hidden files? ".trash" folder?
+		if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
+			d.removeFileById(batch, i.FileId)
+		} else {
+			d.UpdateFile(batch, i.File)
+		}
+		// Update the checkpoint, which now encompasses one additional change.
+		d.setLastChangeId(i.Id)
+		err = d.writeCheckpoint(batch)
+		if err != nil {
+			return err
+		}
+		// Commit
+		err = d.db.Write(batch, nil)
+		if err != nil {
+			return err
+		}
+	}
+	d.lruCache.Remove("rootInodes")
+	// Signal we're synced, if we are.
+	if d.lastChangeId() >= c.LargestChangeId {
+		d.synced.Broadcast()
+	}
+	return nil
+}
+
+// sync is a background goroutine to sync drive data.
+func (d *DriveDB) sync() {
+	var c *gdrive.ChangeList
+	for {
+		c = <-d.changes
+		err := d.processChange(c)
+		// TODO: figure out how to recover from the error.
+		log.Printf("sync error: %v", err)
 	}
 }
 
@@ -605,12 +620,14 @@ func (d *DriveDB) pollSleep() {
 	time.Sleep(d.pollInterval)
 }
 
+// WaitUntilSynced blocks until are are synced with Drive.
 func (d *DriveDB) WaitUntilSynced() {
 	d.synced.L.Lock()
 	d.synced.Wait()
 	d.synced.L.Unlock()
 }
 
+// Close closes DriveDB, waiting until all iterators are closed.
 func (d *DriveDB) Close() {
 	d.iters.Wait()
 	d.db.Close()
