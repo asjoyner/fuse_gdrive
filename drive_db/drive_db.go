@@ -120,7 +120,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 	d.synced = sync.NewCond(&d.syncmu)
 
 	go d.sync()
-	go d.readChanges()
+	go d.pollForChanges()
 	return d, nil
 }
 
@@ -514,7 +514,24 @@ func (d *DriveDB) FlushCachedInode(inode uint64) {
 	d.lruCache.Remove(inode)
 }
 
-// readChanges is a background goroutine to poll Drive for changes.
+// pollForChanges is a background goroutine to poll Drive for changes.
+func (d *DriveDB) pollForChanges() {
+	poll := make(chan struct{})
+	//var trigger struct{}
+	pollTime := time.NewTicker(d.pollInterval).C
+
+	d.readChanges()
+	for {
+		select {
+		case <- pollTime:
+			d.readChanges()
+		case <- poll:
+			d.readChanges()
+		}
+	}
+}
+
+// readChanges is called by pollForChanges to grab all new metadata changes from Drive
 func (d *DriveDB) readChanges() {
 	l := d.service.Changes.List().IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000)
 	lastChangeId := d.lastChangeId()
@@ -523,32 +540,27 @@ func (d *DriveDB) readChanges() {
 		l.StartChangeId(lastChangeId + 1)
 	}
 
+	debug.Printf("Querying Google Drive for changes since %d.", lastChangeId)
 	for {
-		debug.Printf("Querying Google Drive for changes from change %d.", lastChangeId+1)
 		c, err := l.Do()
 		if err != nil {
 			log.Printf("sync error: %v", err)
-			d.pollSleep()
-			continue
+			return
 		}
 		debug.Printf("Response from Drive contains %d changes of %d", len(c.Items), c.LargestChangeId)
 
-		if len(c.Items) == 0 {
-			lastChangeId := c.Items[len(c.Items)-1].Id
-			d.pollSleep()
-			continue
-		}
-
 		// Process the changelist.
 		d.changes <- c
+
+		if len(c.Items) == 0 {
+			return
+		}
 
 		// Go to the next page, or next syncid.
 		if c.NextPageToken != "" {
 			l.PageToken(c.NextPageToken)
 		} else {
-			l = d.service.Changes.List().
-				IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000).
-				StartChangeId(lastChangeId + 1)
+			return
 		}
 	}
 }
@@ -610,8 +622,10 @@ func (d *DriveDB) sync() {
 	for {
 		c = <-d.changes
 		err := d.processChange(c)
-		// TODO: figure out how to recover from the error.
-		log.Printf("sync error: %v", err)
+		if err != nil {
+			// TODO: figure out how to recover from the error.
+			log.Printf("sync error: %v", err)
+		}
 	}
 }
 
