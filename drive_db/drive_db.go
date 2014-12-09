@@ -13,6 +13,7 @@ import (
 
 	gdrive "code.google.com/p/google-api-go-client/drive/v2"
 	"github.com/asjoyner/fuse_gdrive/lru"
+	"github.com/golang/groupcache/singleflight"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/filter"
@@ -25,7 +26,9 @@ const downloadUrlLifetime = time.Duration(time.Hour * 12)
 var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package")
 
 type debugging bool
+
 var debug debugging
+
 func (d debugging) Printf(format string, args ...interface{}) {
 	if d {
 		log.Printf(format, args...)
@@ -70,6 +73,7 @@ type DriveDB struct {
 	changes      chan *gdrive.ChangeList
 	lruCache     *lru.Cache // inode to *File
 	pollInterval time.Duration
+	sf           singleflight.Group
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -179,19 +183,22 @@ func (d *DriveDB) writeCheckpoint(batch *leveldb.Batch) error {
 	return d.db.Put(internalKey("checkpoint"), bytes, nil)
 }
 
+// lastChangeId() returns the last changeID recorded in the checkpoint.
 func (d *DriveDB) lastChangeId() int64 {
 	d.Lock()
 	defer d.Unlock()
 	return d.cpt.LastChangeID
 }
 
+// setLastChangeId sets the lastChangeId in the checkpoint.
+// It does not commit to leveldb; use writeCheckpoint to do that.
 func (d *DriveDB) setLastChangeId(id int64) {
 	d.Lock()
 	defer d.Unlock()
 	d.cpt.LastChangeID = id
 }
 
-// nextInode allocates a new inode number and updates the checkpoint.
+// nextInode allocates a new inode number and updates the checkpoint, including writing to leveldb.
 func (d *DriveDB) nextInode(batch *leveldb.Batch) (uint64, error) {
 	var inode uint64
 	d.Lock()
@@ -202,19 +209,25 @@ func (d *DriveDB) nextInode(batch *leveldb.Batch) (uint64, error) {
 }
 
 // InodeForFileId returns a File's inode number, given its ID.
-// Allocates a new inode number if needed.
+// Allocates a new inode number if needed, and commits immediately
+// to leveldb.
 func (d *DriveDB) InodeForFileId(fileId string) (uint64, error) {
-	return d.inodeForFileId(nil, fileId)
+	key := "inf:" + fileId
+	v, err := d.sf.Do(key, func() (interface{}, error) {
+		return d.inodeForFileIdImpl(fileId)
+	})
+	return v.(uint64), err
 }
 
-func (d *DriveDB) inodeForFileId(batch *leveldb.Batch, fileId string) (uint64, error) {
-	// TODO: singleflight
+func (d *DriveDB) inodeForFileIdImpl(fileId string) (uint64, error) {
 	var inode uint64
 	err := d.get(fileIdToInodeKey(fileId), &inode)
 	if err == nil {
 		// return what we have.
 		return inode, nil
 	}
+
+	batch := new(leveldb.Batch)
 
 	// allocate an inode number
 	inode, err = d.nextInode(batch)
@@ -232,9 +245,6 @@ func (d *DriveDB) inodeForFileId(batch *leveldb.Batch, fileId string) (uint64, e
 		return 0, err
 	}
 
-	if batch == nil {
-		batch = new(leveldb.Batch)
-	}
 	// Create forward and reverse mappings.
 	batch.Put(fileIdToInodeKey(fileId), encodedInode)
 	batch.Put(inodeToFileIdKey(inode), encodedFileId)
@@ -478,7 +488,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	}
 
 	// Wipe the lru cache. We'll re-read elsewhere if needed.
-	inode, err := d.inodeForFileId(b, fileId)
+	inode, err := d.InodeForFileId(fileId)
 	if err != nil {
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
 	}
@@ -523,9 +533,9 @@ func (d *DriveDB) pollForChanges() {
 	d.readChanges()
 	for {
 		select {
-		case <- pollTime:
+		case <-pollTime:
 			d.readChanges()
-		case <- poll:
+		case <-poll:
 			d.readChanges()
 		}
 	}
@@ -585,7 +595,7 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 	for _, i := range c.Items {
 		batch.Reset()
 		// Wipe the lru cache for this file. We'll re-read elsewhere if needed.
-		inode, err := d.inodeForFileId(batch, i.FileId)
+		inode, err := d.InodeForFileId(i.FileId)
 		if err != nil && inode > 0 {
 			d.lruCache.Remove(inode)
 		}
