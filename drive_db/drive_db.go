@@ -431,10 +431,10 @@ func (d *DriveDB) RemoveFile(f *gdrive.File) error {
 	if f == nil {
 		return nil
 	}
-	return d.removeFileById(nil, f.Id)
+	return d.RemoveFileById(f.Id, nil)
 }
 
-func (d *DriveDB) removeFileById(batch *leveldb.Batch, fileId string) error {
+func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	if batch == nil {
 		batch = new(leveldb.Batch)
 	}
@@ -602,7 +602,7 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 		// Update leveldb.
 		// TODO: don't delete trashed/hidden files? ".trash" folder?
 		if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
-			d.removeFileById(batch, i.FileId)
+			d.RemoveFileById(i.FileId, batch)
 		} else {
 			d.UpdateFile(batch, i.File)
 		}

@@ -197,6 +197,10 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.MkdirRequest:
 		sc.Mkdir(req)
 
+	// Return MkdirResponse (it's LookupResponse, essentially) of new dir
+	case *fuse.RemoveRequest:
+		sc.Remove(req)
+
 	// Ack that the kernel has forgotten the metadata about an inode
 	case *fuse.FlushRequest:
 		req.Respond()
@@ -326,12 +330,31 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	req.Respond(resp)
 }
 
-// TODO: Implement remove (doubles as rmdir)
-/*
-func (n *Node) Remove(req *fuse.RemoveRequest, intr Intr) fuse.Error {
+// Remove also covers rmdir
+func (sc *serveConn) Remove(req *fuse.RemoveRequest) {
 	// TODO: if allow_other, require uid == invoking uid to allow writes
+	// TODO: consider disallowing deletion of directories with contents.. but what error?
+	pInode := uint64(req.Header.Node)
+	parent, err := sc.db.FileByInode(pInode)
+	if err != nil {
+		debug.Printf("failed to get parent file: %v", err)
+		req.RespondError(fuse.EIO)
+	}
+	for _, cInode := range parent.Children {
+		child, err := sc.db.FileByInode(cInode)
+		if err != nil {
+			debug.Printf("failed to get child file: %v", err)
+		}
+		if child.Title == req.Name {
+			sc.service.Files.Delete(child.Id).Do()
+			sc.db.RemoveFileById(child.Id, nil)
+			sc.db.FlushCachedInode(pInode)
+			req.Respond()
+			return
+		}
+	}
+	req.RespondError(fuse.ENOENT)
 }
-*/
 
 // TODO: Implement Write
 /*
