@@ -114,6 +114,7 @@ func main() {
 
 	driveCache := cache.NewCache("/tmp", client)
 
+	// TODO: retries
 	service, _ := drive.New(client)
 	about, err := service.About.Get().Do()
 	if err != nil {

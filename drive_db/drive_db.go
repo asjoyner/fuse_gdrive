@@ -125,6 +125,8 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 
 	go d.sync()
 	go d.pollForChanges()
+	// TODO: flag wrap this, it has serious privacy and access concerns
+	registerDebugHandles(*d)  // in http_handlers.go
 	return d, nil
 }
 
