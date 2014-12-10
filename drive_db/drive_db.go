@@ -126,7 +126,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 	go d.sync()
 	go d.pollForChanges()
 	if debug {
-		registerDebugHandles(*d)  // in http_handlers.go
+		registerDebugHandles(*d) // in http_handlers.go
 	}
 	return d, nil
 }

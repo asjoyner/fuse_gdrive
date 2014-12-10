@@ -22,6 +22,7 @@ import (
 
 	"code.google.com/p/goauth2/oauth"
 )
+
 var defaultClientId string = "902751591868-ghc6jn2vquj6s8n5v5np2i66h3dh5pqq.apps.googleusercontent.com"
 var defaultSecret string = "LLsUuv2NoLglNKx14t5dA9SC"
 
@@ -139,7 +140,7 @@ func getOAuthClient(scope string) *http.Client {
 	}
 
 	var config = &oauth.Config{
-		ClientId:			c,
+		ClientId:     c,
 		ClientSecret: s,
 		Scope:        scope, // of access requested (drive, gmail, etc)
 		AuthURL:      "https://accounts.google.com/o/oauth2/auth",

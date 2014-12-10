@@ -44,7 +44,7 @@ func (d *DriveDB) inodesHandler(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprintf(w, "Failed to read checkpoint: %v", err)
 		return
 	}
-	for i:=2; uint64(i)<=cpt.LastInode; i++ {
+	for i := 2; uint64(i) <= cpt.LastInode; i++ {
 		var fileId string
 		err := d.get(inodeToFileIdKey(uint64(i)), &fileId)
 		if err != nil {
