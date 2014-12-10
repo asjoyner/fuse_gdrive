@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -19,18 +18,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"code.google.com/p/goauth2/oauth"
 )
+var defaultClientId string = "902751591868-ghc6jn2vquj6s8n5v5np2i66h3dh5pqq.apps.googleusercontent.com"
+var defaultSecret string = "LLsUuv2NoLglNKx14t5dA9SC"
 
-var clientId = flag.String("clientid", "", "OAuth Client ID.  If non-empty, overrides --clientid_file")
-var clientIdFile = flag.String("clientid_file", "clientid",
-	"Name of a file containing just the project's OAuth Client ID from https://console.developers.google.com/project/<project-id>/apiui/credential")
-var secret = flag.String("secret", "", "OAuth Client Secret.  If non-empty, overrides --secret_file")
-var secretFile = flag.String("secret_file", "clientsecret",
-	"Name of a file containing just the project's OAuth Client Secret from https://console.developers.google.com/project/<project-id>/apiui/credential")
+var clientId = flag.String("clientid", "", "OAuth Client ID")
+var secret = flag.String("secret", "", "OAuth Client Secret")
 var cacheToken = flag.Bool("cachetoken", true, "cache the OAuth token")
 var httpDebug = flag.Bool("http.debug", false, "show HTTP traffic")
 
@@ -133,23 +129,18 @@ func openUrl(url string) {
 	log.Printf("Error opening URL in browser.")
 }
 
-func valueOrFileContents(value string, filename string) string {
-	if value != "" {
-		return value
-	}
-	slurp, err := ioutil.ReadFile(filename)
-	if err != nil {
-		log.Fatalf("Error reading %q: %v", filename, err)
-	}
-	return strings.TrimSpace(string(slurp))
-}
-
 func getOAuthClient(scope string) *http.Client {
+	// TODO: offer to cache clientid & secret if provided by flag
+	c := defaultClientId
+	s := defaultSecret
+	if *clientId != "" && *secret != "" {
+		c = *clientId
+		s = *secret
+	}
+
 	var config = &oauth.Config{
-		// Set by --clientid or --clientid_file
-		ClientId: valueOrFileContents(*clientId, *clientIdFile),
-		// Set by --secret or --secret_file
-		ClientSecret: valueOrFileContents(*secret, *secretFile),
+		ClientId:			c,
+		ClientSecret: s,
 		Scope:        scope, // of access requested (drive, gmail, etc)
 		AuthURL:      "https://accounts.google.com/o/oauth2/auth",
 		TokenURL:     "https://accounts.google.com/o/oauth2/token",
