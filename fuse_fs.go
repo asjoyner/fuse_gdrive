@@ -19,7 +19,7 @@ import (
 )
 
 // https://developers.google.com/drive/web/folder
-var driveFolderMimeType string = "application/vnd.google-apps.folder"
+const driveFolderMimeType string = "application/vnd.google-apps.folder"
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
