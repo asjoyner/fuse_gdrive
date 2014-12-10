@@ -303,6 +303,7 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	if err != nil {
 		debug.Printf("failed to get parent fileid: %v", err)
 		req.RespondError(fuse.EIO)
+		return
 	}
 	p := []*drive.ParentReference{&drive.ParentReference{Id: pId}}
 	file := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
@@ -310,6 +311,7 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	if err != nil {
 		debug.Printf("Insert failed: %v", err)
 		req.RespondError(fuse.EIO)
+		return
 	}
 	debug.Printf("Child of %v created in drive: %+v", file.Parents[0].Id, file)
 	f, err := sc.db.UpdateFile(nil, file)
@@ -319,6 +321,7 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 		// The Changes API will update Fuse, and when the kernel metadata for
 		// the parent directory expires, the new dir will become visible.
 		req.RespondError(fuse.EIO)
+		return
 	}
 	sc.db.FlushCachedInode(pInode)
 	resp := &fuse.MkdirResponse{}

@@ -23,7 +23,7 @@ import (
 
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
 
-var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package")
+var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
 
 type debugging bool
 
@@ -125,8 +125,9 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 
 	go d.sync()
 	go d.pollForChanges()
-	// TODO: flag wrap this, it has serious privacy and access concerns
-	registerDebugHandles(*d)  // in http_handlers.go
+	if debug {
+		registerDebugHandles(*d) // in http_handlers.go
+	}
 	return d, nil
 }
 

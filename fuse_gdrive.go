@@ -103,7 +103,7 @@ func main() {
 	}
 
 	http.HandleFunc("/", RootHandler)
-	go http.ListenAndServe(fmt.Sprintf(":%s", *port), nil)
+	go http.ListenAndServe(fmt.Sprintf("localhost:%s", *port), nil)
 
 	var client *http.Client
 	if *readOnly {
