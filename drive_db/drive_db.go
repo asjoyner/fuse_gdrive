@@ -361,7 +361,6 @@ func (d *DriveDB) FileIdForInode(inode uint64) (string, error) {
 func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	f, ok := d.lruCache.Get(inode)
 	if ok {
-		//fmt.Println("Returning cached inode %v", inode)
 		return f.(*File), nil
 	}
 
@@ -395,7 +394,6 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	}
 
 	d.lruCache.Add(inode, &file)
-	//fmt.Println("Returning fresh inode %v", inode)
 	return &file, nil
 }
 
@@ -442,8 +440,15 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	}
 	// delete the file itself.
 	batch.Delete(fileKey(fileId))
-	// delete the inode mapping.
+	// clear the inode cache.
+	inode, err := d.InodeForFileId(fileId)
+	if err == nil {
+		// remove from the cache
+		d.lruCache.Remove(inode)
+	}
+	// delete the inode mappings.
 	batch.Delete(fileIdToInodeKey(fileId))
+	batch.Delete(inodeToFileIdKey(inode))
 	// delete any "root object" ref
 	batch.Delete(rootKey(fileId))
 	// also delete all of its child refs
@@ -464,11 +469,6 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	err = d.db.Write(batch, nil)
 	if err != nil {
 		return err
-	}
-	i, err := d.InodeForFileId(fileId)
-	if err == nil {
-		// remove from the cache
-		d.lruCache.Remove(i)
 	}
 	return nil
 }
@@ -493,8 +493,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	inode, err := d.InodeForFileId(fileId)
 	if err != nil {
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
-	}
-	if err == nil && inode > 0 {
+	} else {
 		d.lruCache.Remove(inode)
 	}
 
@@ -512,7 +511,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 
 	// Write now if no batch was supplied.
 	if batch == nil {
-		err := d.db.Write(batch, nil)
+		err := d.db.Write(b, nil)
 		if err != nil {
 			return &File{}, err
 		}
