@@ -641,11 +641,6 @@ func (d *DriveDB) sync() {
 	}
 }
 
-func (d *DriveDB) pollSleep() {
-	// TODO: make this an option or parameter.
-	time.Sleep(d.pollInterval)
-}
-
 // WaitUntilSynced blocks until are are synced with Drive.
 func (d *DriveDB) WaitUntilSynced() {
 	d.synced.L.Lock()
