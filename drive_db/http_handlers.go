@@ -118,6 +118,7 @@ func registerDebugHandles(d DriveDB) {
 	http.HandleFunc("/drivedb/fileid/", d.fileIdHandler)
 	http.HandleFunc("/drivedb/fileinode/", d.fileInodeHandler)
 	http.HandleFunc("/drivedb/flushinode/", d.flushInodeHandler)
+	// TODO: Implement /tree printing of FS
 	http.HandleFunc("/drivedb/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, driveDBLinks)
 	})
