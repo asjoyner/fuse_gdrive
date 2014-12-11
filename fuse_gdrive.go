@@ -146,8 +146,11 @@ func main() {
 	if *allowOther {
 		options = append(options, fuse.AllowOther())
 	}
-
-	// TODO: if *readOnly { .. add an option to the fuse library for that
+	/* TODO: uncomment when upstream fuse.ReadOnly is accepted
+	if *readOnly {
+		options = append(options, fuse.ReadOnly())
+	}
+	*/
 	c, err := fuse.Mount(mountpoint, options...)
 	if err != nil {
 		log.Fatal(err)

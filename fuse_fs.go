@@ -171,8 +171,17 @@ func (sc *serveConn) serve(req fuse.Request) {
 			break
 		}
 		*/
+		if *readOnly && !req.Flags.IsReadOnly() {
+			req.RespondError(fuse.EPERM)
+			return
+		}
+		// TODO: if allow_other, require uid == invoking uid to allow writes
 		req.Respond(&fuse.OpenResponse{Handle: fuse.HandleID(req.Header.Node)})
 
+	case *fuse.CreateRequest:
+		sc.Create(req)
+
+		// TODO: if allow_other, require uid == invoking uid to allow writes
 	// Return Dirent
 	case *fuse.ReadRequest:
 		// Lookup which fileId this request refers to
@@ -197,9 +206,13 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.MkdirRequest:
 		sc.Mkdir(req)
 
-	// Return MkdirResponse (it's LookupResponse, essentially) of new dir
+	// Responds for success, RespondError otherwise
 	case *fuse.RemoveRequest:
 		sc.Remove(req)
+
+	// Responds for success, RespondError otherwise
+	case *fuse.WriteRequest:
+		sc.Write(req)
 
 	// Ack that the kernel has forgotten the metadata about an inode
 	case *fuse.FlushRequest:
@@ -296,7 +309,20 @@ func (sc *serveConn) AttrFromFile(file drive_db.File) fuse.Attr {
 	return attr
 }
 
+// TODO: Implement Create
+func (sc *serveConn) Create(req *fuse.CreateRequest) {
+	if *readOnly && !req.Flags.IsReadOnly() {
+		req.RespondError(fuse.EPERM)
+		return
+	}
+	req.RespondError(fuse.EIO)
+}
+
 func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
+	if *readOnly {
+		req.RespondError(fuse.EPERM)
+		return
+	}
 	// TODO: if allow_other, require uid == invoking uid to allow writes
 	pInode := uint64(req.Header.Node)
 	pId, err := sc.db.FileIdForInode(pInode)
@@ -335,6 +361,10 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 
 // Remove also covers rmdir
 func (sc *serveConn) Remove(req *fuse.RemoveRequest) {
+	if *readOnly {
+		req.RespondError(fuse.EPERM)
+		return
+	}
 	// TODO: if allow_other, require uid == invoking uid to allow writes
 	// TODO: consider disallowing deletion of directories with contents.. but what error?
 	pInode := uint64(req.Header.Node)
@@ -359,9 +389,22 @@ func (sc *serveConn) Remove(req *fuse.RemoveRequest) {
 	req.RespondError(fuse.ENOENT)
 }
 
-// TODO: Implement Write
-/*
-func (n *Node) Write(req *fuse.WriteRequest, resp *fuse.WriteResponse, intr fs.Intr) fuse.Error
+// TODO: Implement Rename
+func (sc *serveConn) Rename(req *fuse.RenameRequest) {
+	if *readOnly {
+		req.RespondError(fuse.EPERM)
+		return
+	}
 	// TODO: if allow_other, require uid == invoking uid to allow writes
+	req.RespondError(fuse.EIO)
 }
-*/
+
+// TODO: Implement Write
+func (sc *serveConn) Write(req *fuse.WriteRequest) {
+	if *readOnly {
+		req.RespondError(fuse.EPERM)
+		return
+	}
+	// TODO: if allow_other, require uid == invoking uid to allow writes
+	req.RespondError(fuse.EIO)
+}
