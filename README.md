@@ -11,20 +11,20 @@ For the impatient
     * freebsd: cd /usr/ports/sysutils/fusefs-libs/ && make install
     * from src: [http://fuse.sourceforge.net/](http://fuse.sourceforge.net/)
   2. [install go](http://golang.org/dl), at least version 1.3, for your OS
-  3. Ensure you [set $GOPATH](https://golang.org/doc/code.html#GOPATH) (~/go
-     will work fine), then add $GOPATH/bin to your traditional $PATH
+  3. Ensure you [set `$GOPATH`](https://golang.org/doc/code.html#GOPATH) (~/go
+     will work fine), then add `$GOPATH/bin` to your traditional `$PATH`
      environment variable.
   4. use go to fetch and install this code and its dependencies:
 
-    $ go install github.com/asjoyner/fuse_gdrive
+    `$ go install github.com/asjoyner/fuse_gdrive`
 
   5. make a mount point on your system
 
-    $ mkdir /mnt/gdrive
+    `$ mkdir /mnt/gdrive`
 
   6. request to mount the filesystem
 
-    $ fuse_gdrive /mnt/gdrive
+    `$ fuse_gdrive /mnt/gdrive`
 
   7. A browser window will open for you to grant permission to your files in
      Drive.
@@ -37,7 +37,7 @@ But that didn't work?
 The steps above assume that you're running the fuse client on the same computer
 the web browser is running on.  If you get an error about failing to launch a
 web browser, and have to copy/paste the URL by hand, then you'll also have
-to ensure when your web browser attempts to HTTP post to http://localhost:12345 that
+to ensure when your web browser attempts to HTTP POST to http://localhost:12345 that
 it gets connected to the fuse\_gdrive client.  Typically, you want a command like
 this:
 
