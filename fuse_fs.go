@@ -1,5 +1,7 @@
-// a thin layer of glue between the bazil.org/fuse kernel interface, and Google Drive.
 package main
+
+// This is a thin layer of glue between the bazil.org/fuse kernel interface
+// and Google Drive.
 
 import (
 	"fmt"
