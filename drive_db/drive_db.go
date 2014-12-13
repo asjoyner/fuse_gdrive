@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"io/ioutil"
 	"log"
 	"sync"
@@ -533,8 +534,13 @@ func (d *DriveDB) FlushCachedInode(inode uint64) {
 // pollForChanges is a background goroutine to poll Drive for changes.
 func (d *DriveDB) pollForChanges() {
 	poll := make(chan struct{})
-	//var trigger struct{}
 	pollTime := time.NewTicker(d.pollInterval).C
+	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
+			poll <- struct{}{}
+			fmt.Fprintf(w, "Refresh request accepted.")
+	})
+	// TODO: Allow full requery via http handler, invoke on leveldb corruption
+	// track lastChangeId outside of readChanges, just pass in 0 to rebuild
 
 	d.readChanges()
 	for {
