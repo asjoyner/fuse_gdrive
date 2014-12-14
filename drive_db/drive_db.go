@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
+	"io/ioutil"
 	"log"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
 
 var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
+var logChanges = flag.Bool("logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 
 type debugging bool
 
@@ -74,6 +77,7 @@ type DriveDB struct {
 	lruCache     *lru.Cache // inode to *File
 	pollInterval time.Duration
 	sf           singleflight.Group
+	dbpath       string
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -107,6 +111,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		lruCache:     lru.New(int(1000)), // make the value tunable
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
+		dbpath:       filepath,
 	}
 
 	// Get saved checkpoint.
@@ -529,6 +534,12 @@ func (d *DriveDB) FlushCachedInode(inode uint64) {
 func (d *DriveDB) pollForChanges() {
 	poll := make(chan struct{})
 	pollTime := time.NewTicker(d.pollInterval).C
+	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
+			poll <- struct{}{}
+			fmt.Fprintf(w, "Refresh request accepted.")
+	})
+	// TODO: Allow full requery via http handler, invoke on leveldb corruption
+	// track lastChangeId outside of readChanges, just pass in 0 to rebuild
 
 	d.readChanges()
 	for {
@@ -551,13 +562,20 @@ func (d *DriveDB) readChanges() {
 	}
 
 	debug.Printf("Querying Google Drive for changes since %d.", lastChangeId)
+	var filenum int
 	for {
+		filenum++
 		c, err := l.Do()
 		if err != nil {
 			log.Printf("sync error: %v", err)
 			return
 		}
 		debug.Printf("Response from Drive contains %d changes of %d", len(c.Items), c.LargestChangeId)
+		if *logChanges {
+			filename := fmt.Sprintf("%s/changes.out.%d", d.dbpath, filenum)
+			data, _ := encode(c)
+			ioutil.WriteFile(filename, data, 0700)
+		}
 
 		// Process the changelist.
 		d.changes <- c

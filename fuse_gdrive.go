@@ -1,4 +1,4 @@
-// The fuse-gdrive command makes your Google Drive files accessible as a local mount point.
+// The fuse_gdrive command makes your Google Drive files accessible as a local mount point.
 // It implements a user space filesystem, using the Fuse and Google Drive APIs,
 // to allow you to access your files in Google Drive just like a regular local
 // filesystem.
@@ -146,8 +146,11 @@ func main() {
 	if *allowOther {
 		options = append(options, fuse.AllowOther())
 	}
-
-	// TODO: if *readOnly { .. add an option to the fuse library for that
+	/* TODO: uncomment when upstream fuse.ReadOnly is accepted
+	if *readOnly {
+		options = append(options, fuse.ReadOnly())
+	}
+	*/
 	c, err := fuse.Mount(mountpoint, options...)
 	if err != nil {
 		log.Fatal(err)

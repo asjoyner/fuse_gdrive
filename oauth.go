@@ -1,5 +1,6 @@
-// Utility functions for managing oauth connections.
 package main
+
+// oauth.go contains utility functions for managing oauth connections.
 
 // Credit to the Go examples, from which this is mostly copied:
 // https://code.google.com/p/google-api-go-client/source/browse/examples
