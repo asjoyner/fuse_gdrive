@@ -213,6 +213,10 @@ func (sc *serveConn) serve(req fuse.Request) {
 		sc.Remove(req)
 
 	// Responds for success, RespondError otherwise
+	case *fuse.RenameRequest:
+		sc.Rename(req)
+
+	// Responds for success, RespondError otherwise
 	case *fuse.WriteRequest:
 		sc.Write(req)
 
@@ -394,11 +398,86 @@ func (sc *serveConn) Remove(req *fuse.RemoveRequest) {
 // TODO: Implement Rename
 func (sc *serveConn) Rename(req *fuse.RenameRequest) {
 	if *readOnly {
+		debug.Printf("attempt to rename while fs in readonly mode")
 		req.RespondError(fuse.EPERM)
 		return
 	}
 	// TODO: if allow_other, require uid == invoking uid to allow writes
-	req.RespondError(fuse.EIO)
+	oldParent, err := sc.db.FileByInode(uint64(req.Header.Node))
+	if err != nil {
+		debug.Printf("can't find the referenced inode: %v", req.Header.Node)
+		req.RespondError(fuse.ENOENT)
+		return
+	}
+	var f *drive_db.File
+	for _, i := range oldParent.Children {
+		c, err := sc.db.FileByInode(uint64(i))
+		if err != nil {
+			debug.Printf("error iterating child inodes: %v", err)
+			continue
+		}
+		if c.Title == req.OldName {
+			f = c
+		}
+	}
+	if f == nil {
+		debug.Printf("can't find the old file '%v' in '%v'", req.OldName, oldParent.Title)
+		req.RespondError(fuse.ENOENT)
+		return
+	}
+
+	newParent, err := sc.db.FileByInode(uint64(req.NewDir))
+	if err != nil {
+		debug.Printf("can't find the new parent by inode: %v", req.NewDir)
+		req.RespondError(fuse.ENOENT)
+		return
+	}
+
+	// did the name change?
+	if req.OldName != req.NewName {
+		f.Title = req.NewName
+	}
+
+	// did the parent change?
+	var sameParent bool
+	var numParents int
+	var oldParentId string
+	for _, o := range f.Parents {
+		numParents++
+		oldParentId = o.Id
+		if o.Id == newParent.Id {
+			sameParent = true
+		}
+	}
+	if !sameParent && numParents > 1 {
+		// TODO: Figure out how to identify which of the multiple parents the
+		// file is being moved from, so we can call RemoveParents() correctly
+		debug.Printf("can't reparent file with multiple parents: %v", req.OldName)
+		req.RespondError(fuse.ENOSYS)
+		return
+	}
+
+	u := sc.service.Files.Update(f.Id, f.File)
+	if !sameParent {
+		debug.Printf("moving from %v to %v", oldParentId, newParent.Id)
+		u = u.AddParents(newParent.Id)
+		u = u.RemoveParents(oldParentId)
+	}
+	r, err := u.Do()
+	if err != nil {
+		debug.Printf("failed to update '%v' in drive: %v", req.OldName, err)
+		req.RespondError(fuse.EIO)
+		return
+	}
+
+	if _, err := sc.db.UpdateFile(nil, r); err != nil {
+		debug.Printf("failed to update leveldb and cache: ", err)
+		req.RespondError(fuse.EIO)
+		return
+	}
+	debug.Printf("rename complete")
+	req.Respond()
+	return
 }
 
 // TODO: Implement Write
