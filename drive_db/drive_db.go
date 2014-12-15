@@ -490,29 +490,58 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
 
+	clearFromCache := make([]string, 1)
+	clearFromCache = append(clearFromCache, f.Id)
+
 	b := batch
 	if b == nil {
 		b = new(leveldb.Batch)
 	}
 
-	// Wipe the lru cache. We'll re-read elsewhere if needed.
+	// Find its inode, allocate if necessary
 	inode, err := d.InodeForFileId(fileId)
 	if err != nil {
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
-	} else {
-		d.lruCache.Remove(inode)
+	}
+
+	// Grab a copy of the file object as it existed previously, if it did
+	var oldParents map[string]bool
+	of, err := d.FileById(fileId)
+	if err == nil {
+		oldParents = make(map[string]bool, len(of.Parents))
+		for _, pr := range of.Parents {
+			oldParents[pr.Id] = true
+		}
 	}
 
 	// write the file itself.
 	b.Put(fileKey(fileId), bytes)
 
 	// Maintain child references
+	var hasRootParent bool
 	for _, pr := range f.Parents {
 		if pr.IsRoot {
-			b.Put(rootKey(fileId), []byte{}) // we care only about the key
+			hasRootParent = true
 		} else {
+			debug.Printf("Adding parent: %v", pr.Id)
 			b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
+			clearFromCache = append(clearFromCache, pr.Id)
 		}
+		delete(oldParents, pr.Id)
+	}
+
+	if hasRootParent {
+		b.Put(rootKey(fileId), []byte{}) // we care only about the key
+		debug.Printf("Adding node to root.")
+	} else {
+		b.Delete(rootKey(fileId)) // we care only about the key
+		debug.Printf("Removing node from root.")
+	}
+
+	for pId := range oldParents {  // these parents were no longer present
+		debug.Printf("Removing parent: %v", pId)
+		clearFromCache = append(clearFromCache, pId)
+		b.Delete(childKey(pId+":"+fileId))
 	}
 
 	// Write now if no batch was supplied.
@@ -521,6 +550,15 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		if err != nil {
 			return &File{}, err
 		}
+	}
+
+	// Wipe the lru cache. We'll re-read elsewhere if needed.
+	for _, fileId := range clearFromCache {
+		inode, err := d.InodeForFileId(fileId)
+		if err != nil {
+			debug.Printf("error flushing fileId %v from cache: %v", fileId, err)
+		}
+		d.lruCache.Remove(inode)
 	}
 
 	file := File{f, inode, nil, "", time.Time{}}
