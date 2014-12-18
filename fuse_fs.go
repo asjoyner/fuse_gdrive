@@ -201,6 +201,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 			return
 		}
 		if req.Dir {
+			resp.Data = make([]byte, 0, req.Size)
 			fuseutil.HandleRead(req, resp, data)
 		} else {
 			resp.Data = data
