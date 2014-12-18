@@ -196,7 +196,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 		} else {
 			data, err = sc.Read(inode, req.Offset, req.Size)
 		}
-		if err != nil {
+		if err != nil && err != io.EOF {
 			fuse.Debug(fmt.Sprintf("read failure: %v", err))
 			req.RespondError(fuse.EIO)
 		} else {
@@ -280,7 +280,7 @@ func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) 
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, offset, size)
 	b, err := sc.driveCache.Read(url, offset, int64(size), f.FileSize)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("driveCache.Read (..%v..): %v", offset, err)
 	}
 	return b, nil

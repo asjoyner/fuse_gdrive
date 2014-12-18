@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -538,10 +538,10 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		debug.Printf("Removing node from root.")
 	}
 
-	for pId := range oldParents {  // these parents were no longer present
+	for pId := range oldParents { // these parents were no longer present
 		debug.Printf("Removing parent: %v", pId)
 		clearFromCache = append(clearFromCache, pId)
-		b.Delete(childKey(pId+":"+fileId))
+		b.Delete(childKey(pId + ":" + fileId))
 	}
 
 	// Write now if no batch was supplied.
@@ -574,8 +574,8 @@ func (d *DriveDB) pollForChanges() {
 	poll := make(chan struct{})
 	pollTime := time.NewTicker(d.pollInterval).C
 	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
-			poll <- struct{}{}
-			fmt.Fprintf(w, "Refresh request accepted.")
+		poll <- struct{}{}
+		fmt.Fprintf(w, "Refresh request accepted.")
 	})
 	// TODO: Allow full requery via http handler, invoke on leveldb corruption
 	// track lastChangeId outside of readChanges, just pass in 0 to rebuild
