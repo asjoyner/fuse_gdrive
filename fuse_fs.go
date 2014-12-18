@@ -186,9 +186,8 @@ func (sc *serveConn) serve(req fuse.Request) {
 		// TODO: if allow_other, require uid == invoking uid to allow writes
 	// Return Dirent
 	case *fuse.ReadRequest:
-		// Lookup which fileId this request refers to
 		inode := uint64(req.Header.Node)
-		resp := &fuse.ReadResponse{Data: make([]byte, 0, req.Size)}
+		resp := &fuse.ReadResponse{}
 		var data []byte
 		var err error
 		if req.Dir {
@@ -199,10 +198,14 @@ func (sc *serveConn) serve(req fuse.Request) {
 		if err != nil && err != io.EOF {
 			fuse.Debug(fmt.Sprintf("read failure: %v", err))
 			req.RespondError(fuse.EIO)
-		} else {
-			fuseutil.HandleRead(req, resp, data)
-			req.Respond(resp)
+			return
 		}
+		if req.Dir {
+			fuseutil.HandleRead(req, resp, data)
+		} else {
+			resp.Data = data
+		}
+		req.Respond(resp)
 
 	// Return MkdirResponse (it's LookupResponse, essentially) of new dir
 	case *fuse.MkdirRequest:
@@ -270,6 +273,7 @@ func (sc *serveConn) ReadDir(inode uint64) ([]byte, error) {
 }
 
 func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) {
+	// Lookup which fileId this request refers to
 	f, err := sc.db.FileByInode(inode)
 	if err != nil {
 		return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
