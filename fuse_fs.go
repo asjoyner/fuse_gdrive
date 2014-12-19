@@ -90,7 +90,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	case *fuse.CreateRequest:
 		// TODO: if allow_other, require uid == invoking uid to allow writes
-		sc.Create(req)
+		sc.create(req)
 
 	// Return Dirents for directories, or requested portion of file
 	case *fuse.ReadRequest:
@@ -118,19 +118,22 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	// Return MkdirResponse (it's LookupResponse, essentially) of new dir
 	case *fuse.MkdirRequest:
-		sc.Mkdir(req)
+		sc.mkdir(req)
 
+	// Removes the inode described by req.Header.Node
 	// Respond() for success, RespondError otherwise
 	case *fuse.RemoveRequest:
-		sc.Remove(req)
+		sc.remove(req)
 
-	// Respond() for success, RespondError otherwise
+	// req.Header.Node describes the current parent directory
+	// req.NewDir describes the target directory (may be the same)
+	// req.OldName and req.NewName describe any (or no) change in name
 	case *fuse.RenameRequest:
-		sc.Rename(req)
+		sc.rename(req)
 
 	// Responds with the number of bytes written on success, RespondError otherwise
 	case *fuse.WriteRequest:
-		sc.Write(req)
+		sc.write(req)
 
 	// Ack that the kernel has forgotten the metadata about an inode
 	case *fuse.FlushRequest:
@@ -168,7 +171,7 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 			return
 		}
 
-		attr = sc.AttrFromFile(*f)
+		attr = sc.attrFromFile(*f)
 	}
 	resp.Attr = attr
 	fuse.Debug(resp)
@@ -219,7 +222,7 @@ func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 			resp.Node = fuse.NodeID(cInode)
 			resp.EntryValid = *driveMetadataLatency
 			resp.AttrValid = *driveMetadataLatency
-			resp.Attr = sc.AttrFromFile(*cf)
+			resp.Attr = sc.attrFromFile(*cf)
 			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
 			req.Respond(resp)
 			found = true
@@ -286,7 +289,7 @@ func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) 
 	return b, nil
 }
 
-func (sc *serveConn) AttrFromFile(file drive_db.File) fuse.Attr {
+func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 	var atime, mtime, crtime time.Time
 	if err := atime.UnmarshalText([]byte(file.LastViewedByMeDate)); err != nil {
 		atime = startup
@@ -334,8 +337,8 @@ func (sc *serveConn) open(req *fuse.OpenRequest) {
 	req.Respond(&fuse.OpenResponse{Handle: fuse.HandleID(req.Header.Node)})
 }
 
-// TODO: Implement Create
-func (sc *serveConn) Create(req *fuse.CreateRequest) {
+// TODO: Implement create
+func (sc *serveConn) create(req *fuse.CreateRequest) {
 	if *readOnly && !req.Flags.IsReadOnly() {
 		req.RespondError(fuse.EPERM)
 		return
@@ -343,7 +346,7 @@ func (sc *serveConn) Create(req *fuse.CreateRequest) {
 	req.RespondError(fuse.EIO)
 }
 
-func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
+func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 	if *readOnly {
 		req.RespondError(fuse.EPERM)
 		return
@@ -379,13 +382,17 @@ func (sc *serveConn) Mkdir(req *fuse.MkdirRequest) {
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency
 	resp.AttrValid = *driveMetadataLatency
-	resp.Attr = sc.AttrFromFile(*f)
+	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(fmt.Sprintf("Mkdir(%v): %+v", req.Name, f))
 	req.Respond(resp)
 }
 
-// Remove also covers rmdir
-func (sc *serveConn) Remove(req *fuse.RemoveRequest) {
+// Removes the inode described by req.Header.Node (doubles as rmdir)
+// Nota bene: this simply moves files into the Google Drive "Trash", it does not
+// delete them permanently.
+// Nota bene: there is no check preventing the removal of a directory which
+// contains files.
+func (sc *serveConn) remove(req *fuse.RemoveRequest) {
 	if *readOnly {
 		req.RespondError(fuse.EPERM)
 		return
@@ -414,8 +421,8 @@ func (sc *serveConn) Remove(req *fuse.RemoveRequest) {
 	req.RespondError(fuse.ENOENT)
 }
 
-// TODO: Implement Rename
-func (sc *serveConn) Rename(req *fuse.RenameRequest) {
+// rename renames a file or directory, optionally reparenting it
+func (sc *serveConn) rename(req *fuse.RenameRequest) {
 	if *readOnly {
 		debug.Printf("attempt to rename while fs in readonly mode")
 		req.RespondError(fuse.EPERM)
@@ -499,8 +506,8 @@ func (sc *serveConn) Rename(req *fuse.RenameRequest) {
 	return
 }
 
-// TODO: Implement Write
-func (sc *serveConn) Write(req *fuse.WriteRequest) {
+// TODO: Implement write
+func (sc *serveConn) write(req *fuse.WriteRequest) {
 	if *readOnly {
 		req.RespondError(fuse.EPERM)
 		return
