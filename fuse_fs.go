@@ -94,27 +94,11 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	// Return Dirents for directories, or requested portion of file
 	case *fuse.ReadRequest:
-		inode := uint64(req.Header.Node)
-		resp := &fuse.ReadResponse{}
-		var data []byte
-		var err error
 		if req.Dir {
-			data, err = sc.ReadDir(inode)
+			sc.readDir(req)
 		} else {
-			data, err = sc.Read(inode, req.Offset, req.Size)
+			sc.read(req)
 		}
-		if err != nil && err != io.EOF {
-			fuse.Debug(fmt.Sprintf("read failure: %v", err))
-			req.RespondError(fuse.EIO)
-			return
-		}
-		if req.Dir {
-			resp.Data = make([]byte, 0, req.Size)
-			fuseutil.HandleRead(req, resp, data)
-		} else {
-			resp.Data = data
-		}
-		req.Respond(resp)
 
 	// Return MkdirResponse (it's LookupResponse, essentially) of new dir
 	case *fuse.MkdirRequest:
@@ -235,19 +219,23 @@ func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 	}
 }
 
-func (sc *serveConn) ReadDir(inode uint64) ([]byte, error) {
+func (sc *serveConn) readDir(req *fuse.ReadRequest) {
+	inode := uint64(req.Header.Node)
+	resp := &fuse.ReadResponse{make([]byte, 0, req.Size)}
 	var dirs []fuse.Dirent
 	var children []uint64
 	var err error
 	if inode == 1 {
 		children, err = sc.db.RootInodes()
 		if err != nil {
-			return nil, fmt.Errorf("RootInodes: %v", err)
+			fuse.Debug(fmt.Sprintf("RootInodes(): %v", inode, err))
+			req.RespondError(fuse.EIO)
 		}
 	} else {
 		file, err := sc.db.FileByInode(inode)
 		if err != nil {
-			return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
+			fuse.Debug(fmt.Sprintf("FileByInode(%d): %v", inode, err))
+			req.RespondError(fuse.EIO)
 		}
 		children = file.Children
 	}
@@ -255,7 +243,8 @@ func (sc *serveConn) ReadDir(inode uint64) ([]byte, error) {
 	for _, inode := range children {
 		f, err := sc.db.FileByInode(inode)
 		if err != nil {
-			return nil, fmt.Errorf("FileByInode on child inode %d: %v", inode, err)
+			fuse.Debug(fmt.Sprintf("child: FileByInode(%d): %v", inode, err))
+			req.RespondError(fuse.EIO)
 		}
 		childType := fuse.DT_File
 		if f.MimeType == driveFolderMimeType {
@@ -268,25 +257,30 @@ func (sc *serveConn) ReadDir(inode uint64) ([]byte, error) {
 	for _, dir := range dirs {
 		data = fuse.AppendDirent(data, dir)
 	}
-	return data, nil
+	fuseutil.HandleRead(req, resp, data)
+	req.Respond(resp)
 }
 
-func (sc *serveConn) Read(inode uint64, offset int64, size int) ([]byte, error) {
+func (sc *serveConn) read(req *fuse.ReadRequest) {
+	inode := uint64(req.Header.Node)
+	resp := &fuse.ReadResponse{}
 	// Lookup which fileId this request refers to
 	f, err := sc.db.FileByInode(inode)
 	if err != nil {
-		return nil, fmt.Errorf("FileByInode on inode %d: %v", inode, err)
+		debug.Printf("FileByInode(%d): %v", inode, err)
+		req.RespondError(fuse.EIO)
 	}
 	url := sc.db.FreshDownloadUrl(f)
 	if url == "" { // If there is no url, the file has no body
-		return nil, io.EOF
+		req.RespondError(io.EOF)
 	}
-	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, offset, size)
-	b, err := sc.driveCache.Read(url, offset, int64(size), f.FileSize)
+	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, req.Offset, req.Size)
+	resp.Data, err = sc.driveCache.Read(url, req.Offset, int64(req.Size), f.FileSize)
 	if err != nil && err != io.EOF {
-		return nil, fmt.Errorf("driveCache.Read (..%v..): %v", offset, err)
+		debug.Printf("driveCache.Read (..%v..): %v", req.Offset, err)
+		req.RespondError(fuse.EIO)
 	}
-	return b, nil
+	req.Respond(resp)
 }
 
 func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
