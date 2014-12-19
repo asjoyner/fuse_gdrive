@@ -230,12 +230,14 @@ func (sc *serveConn) readDir(req *fuse.ReadRequest) {
 		if err != nil {
 			fuse.Debug(fmt.Sprintf("RootInodes(): %v", inode, err))
 			req.RespondError(fuse.EIO)
+			return
 		}
 	} else {
 		file, err := sc.db.FileByInode(inode)
 		if err != nil {
 			fuse.Debug(fmt.Sprintf("FileByInode(%d): %v", inode, err))
 			req.RespondError(fuse.EIO)
+			return
 		}
 		children = file.Children
 	}
@@ -245,6 +247,7 @@ func (sc *serveConn) readDir(req *fuse.ReadRequest) {
 		if err != nil {
 			fuse.Debug(fmt.Sprintf("child: FileByInode(%d): %v", inode, err))
 			req.RespondError(fuse.EIO)
+			return
 		}
 		childType := fuse.DT_File
 		if f.MimeType == driveFolderMimeType {
@@ -269,16 +272,19 @@ func (sc *serveConn) read(req *fuse.ReadRequest) {
 	if err != nil {
 		debug.Printf("FileByInode(%d): %v", inode, err)
 		req.RespondError(fuse.EIO)
+		return
 	}
 	url := sc.db.FreshDownloadUrl(f)
 	if url == "" { // If there is no url, the file has no body
 		req.RespondError(io.EOF)
+		return
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, req.Offset, req.Size)
 	resp.Data, err = sc.driveCache.Read(url, req.Offset, int64(req.Size), f.FileSize)
 	if err != nil && err != io.EOF {
 		debug.Printf("driveCache.Read (..%v..): %v", req.Offset, err)
 		req.RespondError(fuse.EIO)
+		return
 	}
 	req.Respond(resp)
 }
@@ -398,6 +404,7 @@ func (sc *serveConn) remove(req *fuse.RemoveRequest) {
 	if err != nil {
 		debug.Printf("failed to get parent file: %v", err)
 		req.RespondError(fuse.EIO)
+		return
 	}
 	for _, cInode := range parent.Children {
 		child, err := sc.db.FileByInode(cInode)
