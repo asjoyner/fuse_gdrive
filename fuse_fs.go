@@ -74,91 +74,11 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.StatfsRequest:
 		req.Respond(&fuse.StatfsResponse{})
 
-	// Return Attr for the given inode
 	case *fuse.GetattrRequest:
-		inode := uint64(req.Header.Node)
-		resp := &fuse.GetattrResponse{}
-		resp.AttrValid = *driveMetadataLatency
-		var attr fuse.Attr
-		if inode == 1 {
-			attr.Inode = 1
-			attr.Mode = os.ModeDir | 0755
-			attr.Atime = sc.launch
-			attr.Mtime = sc.launch
-			attr.Ctime = sc.launch
-			attr.Crtime = sc.launch
-			attr.Uid = sc.uid
-			attr.Gid = sc.gid
-		} else {
-			f, err := sc.db.FileByInode(inode)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
-				req.RespondError(fuse.EIO)
-				break
-			}
+		sc.getattr(req)
 
-			attr = sc.AttrFromFile(*f)
-		}
-		resp.Attr = attr
-		fuse.Debug(resp)
-		req.Respond(resp)
-
-	// Retrieve all children of inode
-	// Return a Dirent for child "xxx" of an inode, or ENOENT
 	case *fuse.LookupRequest:
-		inode := uint64(req.Header.Node)
-		resp := &fuse.LookupResponse{}
-		var childInodes []uint64
-		var err error
-		if inode == 1 {
-			childInodes, err = sc.db.RootInodes()
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("RootInodes lookup failure: %v", err))
-				req.RespondError(fuse.ENOENT)
-				break
-			}
-		} else {
-			file, err := sc.db.FileByInode(inode)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("FileByInode lookup failure for %d: %v", inode, err))
-				req.RespondError(fuse.ENOENT)
-				break
-			}
-			for _, cInode := range file.Children {
-				// TODO: optimize this to not call FileByInode twice for non-root children
-				child, err := sc.db.FileByInode(cInode)
-				if err != nil {
-					fuse.Debug(fmt.Sprintf("child inode %v lookup failure: %v", cInode, err))
-					req.RespondError(fuse.ENOENT)
-					break
-				}
-				childInodes = append(childInodes, child.Inode)
-			}
-		}
-
-		var found bool
-		for _, cInode := range childInodes {
-			cf, err := sc.db.FileByInode(cInode)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", cInode, err))
-				req.RespondError(fuse.EIO)
-				break
-			}
-			if cf.Title == req.Name {
-				resp.Node = fuse.NodeID(cInode)
-				resp.EntryValid = *driveMetadataLatency
-				resp.AttrValid = *driveMetadataLatency
-				resp.Attr = sc.AttrFromFile(*cf)
-				fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
-				req.Respond(resp)
-				found = true
-				break
-			}
-		}
-		if !found {
-			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): ENOENT", req.Name, inode))
-			req.RespondError(fuse.ENOENT)
-		}
+		sc.lookup(req)
 
 	// Ack that the kernel has forgotten the metadata about an inode
 	case *fuse.ForgetRequest:
@@ -166,25 +86,13 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	// Hand back the inode as the HandleID
 	case *fuse.OpenRequest:
-		/* // TODO: Remove Me.  The kernel should never ask to open an inode that
-		* it hasn't already called Lookup on... so we don't need this check...
-		if _, err := fileId, err := sc.db.FileIdForInode(inode); err != nil {
-			req.RespondError(fuse.ENOENT)
-			break
-		}
-		*/
-		if *readOnly && !req.Flags.IsReadOnly() {
-			req.RespondError(fuse.EPERM)
-			return
-		}
-		// TODO: if allow_other, require uid == invoking uid to allow writes
-		req.Respond(&fuse.OpenResponse{Handle: fuse.HandleID(req.Header.Node)})
+		sc.open(req)
 
 	case *fuse.CreateRequest:
+		// TODO: if allow_other, require uid == invoking uid to allow writes
 		sc.Create(req)
 
-		// TODO: if allow_other, require uid == invoking uid to allow writes
-	// Return Dirent
+	// Return Dirents for directories, or requested portion of file
 	case *fuse.ReadRequest:
 		inode := uint64(req.Header.Node)
 		resp := &fuse.ReadResponse{}
@@ -212,15 +120,15 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.MkdirRequest:
 		sc.Mkdir(req)
 
-	// Responds for success, RespondError otherwise
+	// Respond() for success, RespondError otherwise
 	case *fuse.RemoveRequest:
 		sc.Remove(req)
 
-	// Responds for success, RespondError otherwise
+	// Respond() for success, RespondError otherwise
 	case *fuse.RenameRequest:
 		sc.Rename(req)
 
-	// Responds for success, RespondError otherwise
+	// Responds with the number of bytes written on success, RespondError otherwise
 	case *fuse.WriteRequest:
 		sc.Write(req)
 
@@ -234,6 +142,93 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	case *fuse.DestroyRequest:
 		req.Respond()
+	}
+}
+
+// gettattr returns fuse.Attr for the inode described by req.Header.Node
+func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
+	inode := uint64(req.Header.Node)
+	resp := &fuse.GetattrResponse{}
+	resp.AttrValid = *driveMetadataLatency
+	var attr fuse.Attr
+	if inode == 1 {
+		attr.Inode = 1
+		attr.Mode = os.ModeDir | 0755
+		attr.Atime = sc.launch
+		attr.Mtime = sc.launch
+		attr.Ctime = sc.launch
+		attr.Crtime = sc.launch
+		attr.Uid = sc.uid
+		attr.Gid = sc.gid
+	} else {
+		f, err := sc.db.FileByInode(inode)
+		if err != nil {
+			fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
+			req.RespondError(fuse.EIO)
+			return
+		}
+
+		attr = sc.AttrFromFile(*f)
+	}
+	resp.Attr = attr
+	fuse.Debug(resp)
+	req.Respond(resp)
+}
+
+// Return a Dirent for all children of an inode, or ENOENT
+func (sc *serveConn) lookup(req *fuse.LookupRequest) {
+	inode := uint64(req.Header.Node)
+	resp := &fuse.LookupResponse{}
+	var childInodes []uint64
+	var err error
+	if inode == 1 {
+		childInodes, err = sc.db.RootInodes()
+		if err != nil {
+			fuse.Debug(fmt.Sprintf("RootInodes lookup failure: %v", err))
+			req.RespondError(fuse.ENOENT)
+			return
+		}
+	} else {
+		file, err := sc.db.FileByInode(inode)
+		if err != nil {
+			fuse.Debug(fmt.Sprintf("FileByInode lookup failure for %d: %v", inode, err))
+			req.RespondError(fuse.ENOENT)
+			return
+		}
+		for _, cInode := range file.Children {
+			// TODO: optimize this to not call FileByInode twice for non-root children
+			child, err := sc.db.FileByInode(cInode)
+			if err != nil {
+				fuse.Debug(fmt.Sprintf("child inode %v lookup failure: %v", cInode, err))
+				req.RespondError(fuse.ENOENT)
+				return
+			}
+			childInodes = append(childInodes, child.Inode)
+		}
+	}
+
+	var found bool
+	for _, cInode := range childInodes {
+		cf, err := sc.db.FileByInode(cInode)
+		if err != nil {
+			fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", cInode, err))
+			req.RespondError(fuse.EIO)
+			return
+		}
+		if cf.Title == req.Name {
+			resp.Node = fuse.NodeID(cInode)
+			resp.EntryValid = *driveMetadataLatency
+			resp.AttrValid = *driveMetadataLatency
+			resp.Attr = sc.AttrFromFile(*cf)
+			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
+			req.Respond(resp)
+			found = true
+			return
+		}
+	}
+	if !found {
+		fuse.Debug(fmt.Sprintf("Lookup(%v in %v): ENOENT", req.Name, inode))
+		req.RespondError(fuse.ENOENT)
 	}
 }
 
@@ -318,6 +313,25 @@ func (sc *serveConn) AttrFromFile(file drive_db.File) fuse.Attr {
 		attr.Mode = os.ModeDir | 0755
 	}
 	return attr
+}
+
+// Hand back the inode as the HandleID
+func (sc *serveConn) open(req *fuse.OpenRequest) {
+	// This will be cheap, Lookup always preceeds Open, so the cache is warm
+	/* TODO: uncomment this after FileByInode handles inode 1
+	if _, err := sc.db.FileByInode(uint64(req.Header.Node)); err != nil {
+		req.RespondError(fuse.ENOENT)
+		return
+	}
+	*/
+	if *readOnly && !req.Flags.IsReadOnly() {
+		req.RespondError(fuse.EPERM)
+		return
+	}
+	// TODO: if allow_other, require uid == invoking uid to allow writes
+	// TODO: when implementing writes, allocate a kernel handle here, id
+	// allocation scheme TBD...
+	req.Respond(&fuse.OpenResponse{Handle: fuse.HandleID(req.Header.Node)})
 }
 
 // TODO: Implement Create
