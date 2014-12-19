@@ -65,7 +65,7 @@ type File struct {
 type CheckPoint struct {
 	LastChangeID int64
 	LastInode    uint64
-	Version			 int
+	Version      int
 }
 
 type DriveDB struct {
@@ -149,17 +149,17 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 
 func NewCheckpoint() CheckPoint {
 	return CheckPoint{
-		LastInode: 1000,   // start high, to allow "special" inodes
-		Version:	 checkpointVersion,
+		LastInode: 1000, // start high, to allow "special" inodes
+		Version:   checkpointVersion,
 	}
 }
 
 // Delete all the stored metadata from Google Drive, preserving only the
 // mappings of fileid to inodes
 func (d *DriveDB) reinit() error {
-	i := d.cpt.LastInode      // preserve the last Inode allocated
-	d.cpt = NewCheckpoint()   // recreate the checkpoint
-	d.cpt.LastInode = i			  // restore the last Inode allocated
+	i := d.cpt.LastInode    // preserve the last Inode allocated
+	d.cpt = NewCheckpoint() // recreate the checkpoint
+	d.cpt.LastInode = i     // restore the last Inode allocated
 	s := time.Now()
 	err := d.RemoveAllFiles() // blow away all of the metadata from Drive
 	debug.Printf("Removing all files took %v seconds.", time.Since(s))
