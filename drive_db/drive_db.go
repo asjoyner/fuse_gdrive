@@ -28,6 +28,8 @@ const downloadUrlLifetime = time.Duration(time.Hour * 12)
 var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
 var logChanges = flag.Bool("logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 
+var checkpointVersion = 0
+
 type debugging bool
 
 var debug debugging
@@ -63,6 +65,7 @@ type File struct {
 type CheckPoint struct {
 	LastChangeID int64
 	LastInode    uint64
+	Version			 int
 }
 
 type DriveDB struct {
@@ -118,7 +121,15 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 	err = d.get(internalKey("checkpoint"), &d.cpt)
 	if err != nil {
 		log.Printf("error reading checkpoint: %v", err)
-		d.cpt.LastInode = 1000 // start high, to allow "special" inodes
+		d.cpt = NewCheckpoint()
+	}
+	if d.cpt.Version < checkpointVersion {
+		log.Printf("checkpoint version invalid, require %v but found %v", checkpointVersion, d.cpt.Version)
+		err = d.reinit()
+		if err != nil {
+			log.Printf("Failed to reinitialize the database: %v", err)
+			log.Fatal("You should probably run: rm -rf %v", filepath)
+		}
 	}
 	err = d.writeCheckpoint(nil)
 	if err != nil {
@@ -134,6 +145,25 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		registerDebugHandles(*d) // in http_handlers.go
 	}
 	return d, nil
+}
+
+func NewCheckpoint() CheckPoint {
+	return CheckPoint{
+		LastInode: 1000,   // start high, to allow "special" inodes
+		Version:	 checkpointVersion,
+	}
+}
+
+// Delete all the stored metadata from Google Drive, preserving only the
+// mappings of fileid to inodes
+func (d *DriveDB) reinit() error {
+	i := d.cpt.LastInode      // preserve the last Inode allocated
+	d.cpt = NewCheckpoint()   // recreate the checkpoint
+	d.cpt.LastInode = i			  // restore the last Inode allocated
+	s := time.Now()
+	err := d.RemoveAllFiles() // blow away all of the metadata from Drive
+	debug.Printf("Removing all files took %v seconds.", time.Since(s))
+	return err
 }
 
 // LevelDB key helpers. Key prefixes are 3 chars and ":".
@@ -229,18 +259,24 @@ func (d *DriveDB) InodeForFileId(fileId string) (uint64, error) {
 
 func (d *DriveDB) inodeForFileIdImpl(fileId string) (uint64, error) {
 	var inode uint64
-	err := d.get(fileIdToInodeKey(fileId), &inode)
-	if err == nil {
-		// return what we have.
-		return inode, nil
-	}
-
 	batch := new(leveldb.Batch)
 
-	// allocate an inode number
-	inode, err = d.nextInode(batch)
+	// Check if an inode has been allocated for this fileId
+	err := d.get(fileIdToInodeKey(fileId), &inode)
 	if err != nil {
-		return 0, err
+		// if not, allocate an inode number
+		inode, err = d.nextInode(batch)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	// Check the opposite mapping is current and correct
+	var currentId string
+	err = d.get(inodeToFileIdKey(inode), &currentId)
+	if err == nil {
+		// TODO: decode and compare currentId == fileId
+		return inode, nil
 	}
 
 	encodedInode, err := encode(inode)
@@ -433,6 +469,24 @@ func (d *DriveDB) FreshDownloadUrl(f *File) string {
 	return fresh.DownloadUrl
 }
 
+// RemoveAllFiles removes all file entries and child references from leveldb.
+// This also flushes the cache, but preserves the fileid->inode mapping
+func (d *DriveDB) RemoveAllFiles() error {
+	af, err := d.AllFileIds()
+	if err != nil {
+		return fmt.Errorf("AllFileIds(): %v", err)
+	}
+	batch := new(leveldb.Batch)
+	for _, id := range af {
+		d.RemoveFileById(id, batch)
+	}
+	err = d.db.Write(batch, nil)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *DriveDB) RemoveFile(f *gdrive.File) error {
 	if f == nil {
 		return nil
@@ -452,9 +506,11 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 		// remove from the cache
 		d.lruCache.Remove(inode)
 	}
-	// delete the inode mappings.
-	batch.Delete(fileIdToInodeKey(fileId))
+	// delete the inode to fileid mapping
 	batch.Delete(inodeToFileIdKey(inode))
+	// nota bene: fileid to inode mapping is preserved, in case we see this
+	// fileid again in the future; preserves mapping during re-init
+
 	// delete any "root object" ref
 	batch.Delete(rootKey(fileId))
 	// also delete all of its child refs
