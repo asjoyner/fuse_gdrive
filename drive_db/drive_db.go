@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -23,7 +25,13 @@ import (
 
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
 
+// https://developers.google.com/drive/web/folder
+const driveFolderMimeType string = "application/vnd.google-apps.folder"
+
 var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
+var logChanges = flag.Bool("logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
+
+var checkpointVersion = 2
 
 type debugging bool
 
@@ -60,6 +68,7 @@ type File struct {
 type CheckPoint struct {
 	LastChangeID int64
 	LastInode    uint64
+	Version      int
 }
 
 type DriveDB struct {
@@ -74,10 +83,12 @@ type DriveDB struct {
 	lruCache     *lru.Cache // inode to *File
 	pollInterval time.Duration
 	sf           singleflight.Group
+	dbpath       string
+	rootId       string
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
-func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration) (*DriveDB, error) {
+func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration, rootId string) (*DriveDB, error) {
 	if *debugDriveDB {
 		debug = true
 	}
@@ -107,19 +118,33 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		lruCache:     lru.New(int(1000)), // make the value tunable
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
+		dbpath:       filepath,
+		rootId:       rootId,
 	}
 
 	// Get saved checkpoint.
 	err = d.get(internalKey("checkpoint"), &d.cpt)
 	if err != nil {
 		log.Printf("error reading checkpoint: %v", err)
-		d.cpt.LastInode = 1000 // start high, to allow "special" inodes
+		d.cpt = NewCheckpoint()
+	}
+	if d.cpt.Version < checkpointVersion {
+		log.Printf("checkpoint version invalid, require %v but found %v", checkpointVersion, d.cpt.Version)
+		err = d.reinit()
+		if err != nil {
+			log.Printf("Failed to reinitialize the database: %v", err)
+			log.Fatal("You should probably run: rm -rf %v", filepath)
+		}
 	}
 	err = d.writeCheckpoint(nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not write checkpoint: %v", err)
 	}
 	debug.Printf("Recovered from checkpoint: %+v", d.cpt)
+
+	if err := d.createRoot(); err != nil {
+		return nil, fmt.Errorf("could not create root inode entry: %v", err)
+	}
 
 	d.synced = sync.NewCond(&d.syncmu)
 
@@ -129,6 +154,45 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		registerDebugHandles(*d) // in http_handlers.go
 	}
 	return d, nil
+}
+
+func NewCheckpoint() CheckPoint {
+	return CheckPoint{
+		LastInode: 1000, // start high, to allow "special" inodes
+		Version:   checkpointVersion,
+	}
+}
+
+// createRoot synthesizes the root of the filesystem, based on the
+// rootId provided at instantiation time.
+func (d *DriveDB) createRoot() error {
+	launch, _ := time.Unix(1335225600, 0).MarshalText()
+	file := &gdrive.File{
+		Id:                 d.rootId,
+		Title:              "/",
+		MimeType:           driveFolderMimeType,
+		LastViewedByMeDate: string(launch),
+		ModifiedDate:       string(launch),
+		CreatedDate:        string(launch),
+	}
+	// Inode allocation special-cases the rootId, so we can let the usual
+	// code paths do all the work
+	_, err := d.UpdateFile(nil, file)
+	return err
+}
+
+// Delete all the stored metadata from Google Drive, preserving only the
+// mappings of fileid to inodes
+func (d *DriveDB) reinit() error {
+	d.Lock()
+	defer d.Unlock()
+	i := d.cpt.LastInode    // preserve the last Inode allocated
+	d.cpt = NewCheckpoint() // recreate the checkpoint
+	d.cpt.LastInode = i     // restore the last Inode allocated
+	s := time.Now()
+	err := d.RemoveAllFiles() // blow away all of the metadata from Drive
+	debug.Printf("Removing all files took %v seconds.", time.Since(s))
+	return err
 }
 
 // LevelDB key helpers. Key prefixes are 3 chars and ":".
@@ -150,10 +214,6 @@ func fileKey(key string) []byte {
 
 func childKey(key string) []byte {
 	return []byte("kid:" + key)
-}
-
-func rootKey(key string) []byte {
-	return []byte("rtf:" + key)
 }
 
 func deKey(key string) string {
@@ -223,18 +283,31 @@ func (d *DriveDB) InodeForFileId(fileId string) (uint64, error) {
 
 func (d *DriveDB) inodeForFileIdImpl(fileId string) (uint64, error) {
 	var inode uint64
-	err := d.get(fileIdToInodeKey(fileId), &inode)
-	if err == nil {
-		// return what we have.
-		return inode, nil
-	}
-
 	batch := new(leveldb.Batch)
 
-	// allocate an inode number
-	inode, err = d.nextInode(batch)
-	if err != nil {
-		return 0, err
+	// Check if an inode has been allocated for this fileId
+	if fileId == d.rootId {
+		inode = 1
+	} else {
+		err := d.get(fileIdToInodeKey(fileId), &inode)
+		if err != nil {
+			// if not, allocate an inode number
+			inode, err = d.nextInode(batch)
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	// Check the opposite mapping is present and correct
+	var currentId string
+	err := d.get(inodeToFileIdKey(inode), &currentId)
+	if err == nil {
+		if currentId == fileId {
+			return inode, nil
+		} else {
+			debug.Printf("inodeToFileId mapping wrong for %v, expected %v got %v", inode, fileId, currentId)
+		}
 	}
 
 	encodedInode, err := encode(inode)
@@ -270,43 +343,6 @@ func (d *DriveDB) AllFileIds() ([]string, error) {
 	iter.Release()
 	d.iters.Done()
 	return ids, iter.Error()
-}
-
-// RootFileIds returns the IDs of all Google Drive file objects at the root.
-func (d *DriveDB) RootFileIds() ([]string, error) {
-	var ids []string
-	d.iters.Add(1)
-	iter := d.db.NewIterator(util.BytesPrefix(rootKey("")), nil)
-	for iter.Next() {
-		ids = append(ids, deKey(string(iter.Key())))
-	}
-	iter.Release()
-	d.iters.Done()
-	return ids, iter.Error()
-}
-
-// RootInodes returns the inodes of all Google Drive file objects that are
-// children of the root.
-func (d *DriveDB) RootInodes() ([]uint64, error) {
-	f, ok := d.lruCache.Get("rootInodes")
-	if ok {
-		return f.([]uint64), nil
-	}
-
-	var ids []uint64
-	fids, err := d.RootFileIds()
-	if err != nil {
-		return ids, err
-	}
-	for _, fid := range fids {
-		inode, err := d.InodeForFileId(fid)
-		if err == nil {
-			ids = append(ids, inode)
-		}
-	}
-
-	d.lruCache.Add("rootInodes", ids)
-	return ids, nil
 }
 
 // ChildFileIds returns the IDs of all Files that have parent refs to the given file.
@@ -427,6 +463,24 @@ func (d *DriveDB) FreshDownloadUrl(f *File) string {
 	return fresh.DownloadUrl
 }
 
+// RemoveAllFiles removes all file entries and child references from leveldb.
+// This also flushes the cache, but preserves the fileid->inode mapping
+func (d *DriveDB) RemoveAllFiles() error {
+	af, err := d.AllFileIds()
+	if err != nil {
+		return fmt.Errorf("AllFileIds(): %v", err)
+	}
+	batch := new(leveldb.Batch)
+	for _, id := range af {
+		d.RemoveFileById(id, batch)
+	}
+	err = d.db.Write(batch, nil)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *DriveDB) RemoveFile(f *gdrive.File) error {
 	if f == nil {
 		return nil
@@ -446,11 +500,11 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 		// remove from the cache
 		d.lruCache.Remove(inode)
 	}
-	// delete the inode mappings.
-	batch.Delete(fileIdToInodeKey(fileId))
+	// delete the inode to fileid mapping
 	batch.Delete(inodeToFileIdKey(inode))
-	// delete any "root object" ref
-	batch.Delete(rootKey(fileId))
+	// nota bene: fileid to inode mapping is preserved, in case we see this
+	// fileid again in the future; preserves mapping during re-init
+
 	// also delete all of its child refs
 	d.iters.Add(1)
 	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileId)), nil)
@@ -484,17 +538,27 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
 
+	clearFromCache := []string{f.Id}
+
 	b := batch
 	if b == nil {
 		b = new(leveldb.Batch)
 	}
 
-	// Wipe the lru cache. We'll re-read elsewhere if needed.
+	// Find its inode, allocate if necessary
 	inode, err := d.InodeForFileId(fileId)
 	if err != nil {
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
-	} else {
-		d.lruCache.Remove(inode)
+	}
+
+	// Grab a copy of the file object as it existed previously, if it did
+	var oldParents map[string]bool
+	of, err := d.FileById(fileId)
+	if err == nil {
+		oldParents = make(map[string]bool, len(of.Parents))
+		for _, pr := range of.Parents {
+			oldParents[pr.Id] = true
+		}
 	}
 
 	// write the file itself.
@@ -502,11 +566,16 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 
 	// Maintain child references
 	for _, pr := range f.Parents {
-		if pr.IsRoot {
-			b.Put(rootKey(fileId), []byte{}) // we care only about the key
-		} else {
-			b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
-		}
+		debug.Printf("Adding parent: %v", pr.Id)
+		b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
+		clearFromCache = append(clearFromCache, pr.Id)
+		delete(oldParents, pr.Id)
+	}
+
+	for pId := range oldParents { // these parents were no longer present
+		debug.Printf("Removing parent: %v", pId)
+		clearFromCache = append(clearFromCache, pId)
+		b.Delete(childKey(pId + ":" + fileId))
 	}
 
 	// Write now if no batch was supplied.
@@ -515,6 +584,15 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		if err != nil {
 			return &File{}, err
 		}
+	}
+
+	// Wipe the lru cache. We'll re-read elsewhere if needed.
+	for _, fileId := range clearFromCache {
+		inode, err := d.InodeForFileId(fileId)
+		if err != nil {
+			debug.Printf("error flushing fileId %v from cache: %v", fileId, err)
+		}
+		d.lruCache.Remove(inode)
 	}
 
 	file := File{f, inode, nil, "", time.Time{}}
@@ -529,6 +607,12 @@ func (d *DriveDB) FlushCachedInode(inode uint64) {
 func (d *DriveDB) pollForChanges() {
 	poll := make(chan struct{})
 	pollTime := time.NewTicker(d.pollInterval).C
+	http.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
+		poll <- struct{}{}
+		fmt.Fprintf(w, "Refresh request accepted.")
+	})
+	// TODO: Allow full requery via http handler, invoke on leveldb corruption
+	// track lastChangeId outside of readChanges, just pass in 0 to rebuild
 
 	d.readChanges()
 	for {
@@ -551,13 +635,20 @@ func (d *DriveDB) readChanges() {
 	}
 
 	debug.Printf("Querying Google Drive for changes since %d.", lastChangeId)
+	var filenum int
 	for {
+		filenum++
 		c, err := l.Do()
 		if err != nil {
 			log.Printf("sync error: %v", err)
 			return
 		}
 		debug.Printf("Response from Drive contains %d changes of %d", len(c.Items), c.LargestChangeId)
+		if *logChanges {
+			filename := fmt.Sprintf("%s/changes.out.%d", d.dbpath, filenum)
+			data, _ := encode(c)
+			ioutil.WriteFile(filename, data, 0700)
+		}
 
 		// Process the changelist.
 		d.changes <- c
@@ -618,7 +709,6 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 			return err
 		}
 	}
-	d.lruCache.Remove("rootInodes")
 	// Signal we're synced, if we are.
 	if d.lastChangeId() >= c.LargestChangeId {
 		d.synced.Broadcast()

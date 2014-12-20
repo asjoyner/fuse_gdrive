@@ -6,6 +6,7 @@ package cache
 import (
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -59,8 +60,13 @@ func NewCache(path string, client *http.Client) Reader {
 }
 
 func (d *driveCache) Read(url string, offset int64, size int64, max int64) ([]byte, error) {
-	if (offset + size) > max {
+	if offset > max {
 		return nil, fmt.Errorf("%v: read past EOF : (offset: %v size: %v max: %v)", url, offset, size, max)
+	}
+	var eof bool
+	if (offset + size) > max {
+		eof = true
+		size = max - offset
 	}
 	// figure out which chunks we need in order to satisfy the read
 	startChunk := offset / d.chunkSize
@@ -100,7 +106,11 @@ func (d *driveCache) Read(url string, offset int64, size int64, max int64) ([]by
 			go d.readChunk(nextChunk)
 		}
 	}
-	return retBytes[retStart:retEnd], nil
+	var err error
+	if eof {
+		err = io.EOF
+	}
+	return retBytes[retStart:retEnd], err
 }
 
 func (d *driveCache) chunkN(url string, n int64, max int64) chunk {

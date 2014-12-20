@@ -1,4 +1,4 @@
-// The fuse-gdrive command makes your Google Drive files accessible as a local mount point.
+// The fuse_gdrive command makes your Google Drive files accessible as a local mount point.
 // It implements a user space filesystem, using the Fuse and Google Drive APIs,
 // to allow you to access your files in Google Drive just like a regular local
 // filesystem.
@@ -121,21 +121,21 @@ func main() {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
 
+	// fileId of the root of the FS (aka "My Drive")
+	rootId := about.RootFolderId
+	// email address of the mounted google drive account
+	account := about.User.EmailAddress
+
 	// Create and start the drive metadata syncer.
 	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
 	log.Printf("using drivedb: %v", dbpath)
-	db, err := drive_db.NewDriveDB(service, dbpath, *driveMetadataLatency)
+	db, err := drive_db.NewDriveDB(service, dbpath, *driveMetadataLatency, rootId)
 	if err != nil {
 		log.Fatalf("could not open leveldb: %v", err)
 	}
 	defer db.Close()
 	db.WaitUntilSynced()
 	log.Printf("synced!")
-
-	// fileId of the root of the FS (aka "My Drive")
-	rootId := about.RootFolderId
-	// email address of the mounted google drive account
-	account := about.User.EmailAddress
 
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),
@@ -146,8 +146,11 @@ func main() {
 	if *allowOther {
 		options = append(options, fuse.AllowOther())
 	}
-
-	// TODO: if *readOnly { .. add an option to the fuse library for that
+	/* TODO: uncomment when upstream fuse.ReadOnly is accepted
+	if *readOnly {
+		options = append(options, fuse.ReadOnly())
+	}
+	*/
 	c, err := fuse.Mount(mountpoint, options...)
 	if err != nil {
 		log.Fatal(err)
@@ -169,11 +172,9 @@ func main() {
 		driveCache: driveCache,
 		service:    service,
 		//handles:    make(map[fuse.HandleID]string),
-		launch: time.Unix(1335225600, 0),
-		uid:    uid,
-		gid:    gid,
-		rootId: rootId,
-		conn:   c,
+		uid:  uid,
+		gid:  gid,
+		conn: c,
 	}
 	err = sc.Serve()
 	if err != nil {
