@@ -172,10 +172,9 @@ func main() {
 		driveCache: driveCache,
 		service:    service,
 		//handles:    make(map[fuse.HandleID]string),
-		launch: time.Unix(1335225600, 0),
-		uid:    uid,
-		gid:    gid,
-		conn:   c,
+		uid:  uid,
+		gid:  gid,
+		conn: c,
 	}
 	err = sc.Serve()
 	if err != nil {

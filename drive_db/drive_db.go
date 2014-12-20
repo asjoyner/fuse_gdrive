@@ -24,6 +24,7 @@ import (
 )
 
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
+
 // https://developers.google.com/drive/web/folder
 const driveFolderMimeType string = "application/vnd.google-apps.folder"
 
@@ -83,7 +84,7 @@ type DriveDB struct {
 	pollInterval time.Duration
 	sf           singleflight.Group
 	dbpath       string
-	rootId			 string
+	rootId       string
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
@@ -118,7 +119,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
 		dbpath:       filepath,
-		rootId:				rootId,
+		rootId:       rootId,
 	}
 
 	// Get saved checkpoint.
@@ -165,7 +166,15 @@ func NewCheckpoint() CheckPoint {
 // createRoot synthesizes the root of the filesystem, based on the
 // rootId provided at instantiation time.
 func (d *DriveDB) createRoot() error {
-	file := &gdrive.File{Id: d.rootId, Title: "/", MimeType: driveFolderMimeType}
+	launch, _ := time.Unix(1335225600, 0).MarshalText()
+	file := &gdrive.File{
+		Id:                 d.rootId,
+		Title:              "/",
+		MimeType:           driveFolderMimeType,
+		LastViewedByMeDate: string(launch),
+		ModifiedDate:       string(launch),
+		CreatedDate:        string(launch),
+	}
 	// Inode allocation special-cases the rootId, so we can let the usual
 	// code paths do all the work
 	_, err := d.UpdateFile(nil, file)
@@ -205,10 +214,6 @@ func fileKey(key string) []byte {
 
 func childKey(key string) []byte {
 	return []byte("kid:" + key)
-}
-
-func rootKey(key string) []byte {
-	return []byte("rtf:" + key)
 }
 
 func deKey(key string) string {
@@ -339,43 +344,6 @@ func (d *DriveDB) AllFileIds() ([]string, error) {
 	iter.Release()
 	d.iters.Done()
 	return ids, iter.Error()
-}
-
-// RootFileIds returns the IDs of all Google Drive file objects at the root.
-func (d *DriveDB) RootFileIds() ([]string, error) {
-	var ids []string
-	d.iters.Add(1)
-	iter := d.db.NewIterator(util.BytesPrefix(rootKey("")), nil)
-	for iter.Next() {
-		ids = append(ids, deKey(string(iter.Key())))
-	}
-	iter.Release()
-	d.iters.Done()
-	return ids, iter.Error()
-}
-
-// RootInodes returns the inodes of all Google Drive file objects that are
-// children of the root.
-func (d *DriveDB) RootInodes() ([]uint64, error) {
-	f, ok := d.lruCache.Get("rootInodes")
-	if ok {
-		return f.([]uint64), nil
-	}
-
-	var ids []uint64
-	fids, err := d.RootFileIds()
-	if err != nil {
-		return ids, err
-	}
-	for _, fid := range fids {
-		inode, err := d.InodeForFileId(fid)
-		if err == nil {
-			ids = append(ids, inode)
-		}
-	}
-
-	d.lruCache.Add("rootInodes", ids)
-	return ids, nil
 }
 
 // ChildFileIds returns the IDs of all Files that have parent refs to the given file.
@@ -538,8 +506,6 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	// nota bene: fileid to inode mapping is preserved, in case we see this
 	// fileid again in the future; preserves mapping during re-init
 
-	// delete any "root object" ref
-	batch.Delete(rootKey(fileId))
 	// also delete all of its child refs
 	d.iters.Add(1)
 	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileId)), nil)
@@ -600,24 +566,11 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	b.Put(fileKey(fileId), bytes)
 
 	// Maintain child references
-	var hasRootParent bool
 	for _, pr := range f.Parents {
-		if pr.IsRoot {
-			hasRootParent = true
-		} else {
-			debug.Printf("Adding parent: %v", pr.Id)
-			b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
-			clearFromCache = append(clearFromCache, pr.Id)
-		}
+		debug.Printf("Adding parent: %v", pr.Id)
+		b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
+		clearFromCache = append(clearFromCache, pr.Id)
 		delete(oldParents, pr.Id)
-	}
-
-	if hasRootParent {
-		b.Put(rootKey(fileId), []byte{}) // we care only about the key
-		debug.Printf("Adding node to root.")
-	} else {
-		b.Delete(rootKey(fileId)) // we care only about the key
-		debug.Printf("Removing node from root.")
 	}
 
 	for pId := range oldParents { // these parents were no longer present
@@ -757,7 +710,6 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 			return err
 		}
 	}
-	d.lruCache.Remove("rootInodes")
 	// Signal we're synced, if we are.
 	if d.lastChangeId() >= c.LargestChangeId {
 		d.synced.Broadcast()

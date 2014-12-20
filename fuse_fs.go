@@ -28,7 +28,6 @@ type serveConn struct {
 	db         *drive_db.DriveDB
 	service    *drive.Service
 	driveCache cache.Reader
-	launch     time.Time
 	uid        uint32 // uid of the user who mounted the FS
 	gid        uint32 // gid of the user who mounted the FS
 	conn       *fuse.Conn
@@ -136,27 +135,14 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 	inode := uint64(req.Header.Node)
 	resp := &fuse.GetattrResponse{}
 	resp.AttrValid = *driveMetadataLatency
-	var attr fuse.Attr
-	if inode == 1 {
-		attr.Inode = 1
-		attr.Mode = os.ModeDir | 0755
-		attr.Atime = sc.launch
-		attr.Mtime = sc.launch
-		attr.Ctime = sc.launch
-		attr.Crtime = sc.launch
-		attr.Uid = sc.uid
-		attr.Gid = sc.gid
-	} else {
-		f, err := sc.db.FileByInode(inode)
-		if err != nil {
-			fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
-			req.RespondError(fuse.EIO)
-			return
-		}
-
-		attr = sc.attrFromFile(*f)
+	f, err := sc.db.FileByInode(inode)
+	if err != nil {
+		fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
+		req.RespondError(fuse.EIO)
+		return
 	}
-	resp.Attr = attr
+
+	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(resp)
 	req.Respond(resp)
 }
@@ -165,36 +151,14 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 	inode := uint64(req.Header.Node)
 	resp := &fuse.LookupResponse{}
-	var childInodes []uint64
 	var err error
-	if inode == 1 {
-		childInodes, err = sc.db.RootInodes()
-		if err != nil {
-			fuse.Debug(fmt.Sprintf("RootInodes lookup failure: %v", err))
-			req.RespondError(fuse.ENOENT)
-			return
-		}
-	} else {
-		file, err := sc.db.FileByInode(inode)
-		if err != nil {
-			fuse.Debug(fmt.Sprintf("FileByInode lookup failure for %d: %v", inode, err))
-			req.RespondError(fuse.ENOENT)
-			return
-		}
-		for _, cInode := range file.Children {
-			// TODO: optimize this to not call FileByInode twice for non-root children
-			child, err := sc.db.FileByInode(cInode)
-			if err != nil {
-				fuse.Debug(fmt.Sprintf("child inode %v lookup failure: %v", cInode, err))
-				req.RespondError(fuse.ENOENT)
-				return
-			}
-			childInodes = append(childInodes, child.Inode)
-		}
+	file, err := sc.db.FileByInode(inode)
+	if err != nil {
+		fuse.Debug(fmt.Sprintf("FileByInode lookup failure for %d: %v", inode, err))
+		req.RespondError(fuse.ENOENT)
+		return
 	}
-
-	var found bool
-	for _, cInode := range childInodes {
+	for _, cInode := range file.Children {
 		cf, err := sc.db.FileByInode(cInode)
 		if err != nil {
 			fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", cInode, err))
@@ -208,40 +172,26 @@ func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 			resp.Attr = sc.attrFromFile(*cf)
 			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
 			req.Respond(resp)
-			found = true
 			return
 		}
 	}
-	if !found {
-		fuse.Debug(fmt.Sprintf("Lookup(%v in %v): ENOENT", req.Name, inode))
-		req.RespondError(fuse.ENOENT)
-	}
+	fuse.Debug(fmt.Sprintf("Lookup(%v in %v): ENOENT", req.Name, inode))
+	req.RespondError(fuse.ENOENT)
 }
 
 func (sc *serveConn) readDir(req *fuse.ReadRequest) {
 	inode := uint64(req.Header.Node)
 	resp := &fuse.ReadResponse{make([]byte, 0, req.Size)}
 	var dirs []fuse.Dirent
-	var children []uint64
 	var err error
-	if inode == 1 {
-		children, err = sc.db.RootInodes()
-		if err != nil {
-			fuse.Debug(fmt.Sprintf("RootInodes(): %v", inode, err))
-			req.RespondError(fuse.EIO)
-			return
-		}
-	} else {
-		file, err := sc.db.FileByInode(inode)
-		if err != nil {
-			fuse.Debug(fmt.Sprintf("FileByInode(%d): %v", inode, err))
-			req.RespondError(fuse.EIO)
-			return
-		}
-		children = file.Children
+	file, err := sc.db.FileByInode(inode)
+	if err != nil {
+		fuse.Debug(fmt.Sprintf("FileByInode(%d): %v", inode, err))
+		req.RespondError(fuse.EIO)
+		return
 	}
 
-	for _, inode := range children {
+	for _, inode := range file.Children {
 		f, err := sc.db.FileByInode(inode)
 		if err != nil {
 			fuse.Debug(fmt.Sprintf("child: FileByInode(%d): %v", inode, err))
@@ -359,11 +309,7 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 		return
 	}
 	p := []*drive.ParentReference{&drive.ParentReference{Id: pId}}
-	if pInode == 1 {
-		p[0].IsRoot = true
-	}
 	file := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
-	debug.Printf("Inserting new directory: %+v at %+v", file, p[0])
 	file, err = sc.service.Files.Insert(file).Do()
 	if err != nil {
 		debug.Printf("Insert failed: %v", err)
