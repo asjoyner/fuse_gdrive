@@ -21,7 +21,7 @@ import (
 )
 
 // https://developers.google.com/drive/web/folder
-var driveFolderMimeType string = "application/vnd.google-apps.folder"
+const driveFolderMimeType string = "application/vnd.google-apps.folder"
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
@@ -29,7 +29,6 @@ type serveConn struct {
 	service    *drive.Service
 	driveCache cache.Reader
 	launch     time.Time
-	rootId     string // the fileId of the root
 	uid        uint32 // uid of the user who mounted the FS
 	gid        uint32 // gid of the user who mounted the FS
 	conn       *fuse.Conn
@@ -360,7 +359,11 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 		return
 	}
 	p := []*drive.ParentReference{&drive.ParentReference{Id: pId}}
+	if pInode == 1 {
+		p[0].IsRoot = true
+	}
 	file := &drive.File{Title: req.Name, MimeType: driveFolderMimeType, Parents: p}
+	debug.Printf("Inserting new directory: %+v at %+v", file, p[0])
 	file, err = sc.service.Files.Insert(file).Do()
 	if err != nil {
 		debug.Printf("Insert failed: %v", err)

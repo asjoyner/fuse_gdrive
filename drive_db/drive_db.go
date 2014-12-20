@@ -24,11 +24,13 @@ import (
 )
 
 const downloadUrlLifetime = time.Duration(time.Hour * 12)
+// https://developers.google.com/drive/web/folder
+const driveFolderMimeType string = "application/vnd.google-apps.folder"
 
 var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
 var logChanges = flag.Bool("logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 
-var checkpointVersion = 0
+var checkpointVersion = 2
 
 type debugging bool
 
@@ -81,10 +83,11 @@ type DriveDB struct {
 	pollInterval time.Duration
 	sf           singleflight.Group
 	dbpath       string
+	rootId			 string
 }
 
 // NewDriveDB creates a new DriveDB and starts syncing.
-func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration) (*DriveDB, error) {
+func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration, rootId string) (*DriveDB, error) {
 	if *debugDriveDB {
 		debug = true
 	}
@@ -115,6 +118,7 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
 		dbpath:       filepath,
+		rootId:				rootId,
 	}
 
 	// Get saved checkpoint.
@@ -137,6 +141,10 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 	}
 	debug.Printf("Recovered from checkpoint: %+v", d.cpt)
 
+	if err := d.createRoot(); err != nil {
+		return nil, fmt.Errorf("could not create root inode entry: %v", err)
+	}
+
 	d.synced = sync.NewCond(&d.syncmu)
 
 	go d.sync()
@@ -154,9 +162,21 @@ func NewCheckpoint() CheckPoint {
 	}
 }
 
+// createRoot synthesizes the root of the filesystem, based on the
+// rootId provided at instantiation time.
+func (d *DriveDB) createRoot() error {
+	file := &gdrive.File{Id: d.rootId, Title: "/", MimeType: driveFolderMimeType}
+	// Inode allocation special-cases the rootId, so we can let the usual
+	// code paths do all the work
+	_, err := d.UpdateFile(nil, file)
+	return err
+}
+
 // Delete all the stored metadata from Google Drive, preserving only the
 // mappings of fileid to inodes
 func (d *DriveDB) reinit() error {
+	d.Lock()
+	defer d.Unlock()
 	i := d.cpt.LastInode    // preserve the last Inode allocated
 	d.cpt = NewCheckpoint() // recreate the checkpoint
 	d.cpt.LastInode = i     // restore the last Inode allocated
@@ -262,21 +282,28 @@ func (d *DriveDB) inodeForFileIdImpl(fileId string) (uint64, error) {
 	batch := new(leveldb.Batch)
 
 	// Check if an inode has been allocated for this fileId
-	err := d.get(fileIdToInodeKey(fileId), &inode)
-	if err != nil {
-		// if not, allocate an inode number
-		inode, err = d.nextInode(batch)
+	if fileId == d.rootId {
+		inode = 1
+	} else {
+		err := d.get(fileIdToInodeKey(fileId), &inode)
 		if err != nil {
-			return 0, err
+			// if not, allocate an inode number
+			inode, err = d.nextInode(batch)
+			if err != nil {
+				return 0, err
+			}
 		}
 	}
 
-	// Check the opposite mapping is current and correct
+	// Check the opposite mapping is present and correct
 	var currentId string
-	err = d.get(inodeToFileIdKey(inode), &currentId)
+	err := d.get(inodeToFileIdKey(inode), &currentId)
 	if err == nil {
-		// TODO: decode and compare currentId == fileId
-		return inode, nil
+		if currentId == fileId {
+			return inode, nil
+		} else {
+			debug.Printf("inodeToFileId mapping wrong for %v, expected %v got %v", inode, fileId, currentId)
+		}
 	}
 
 	encodedInode, err := encode(inode)
@@ -546,8 +573,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
 
-	clearFromCache := make([]string, 1)
-	clearFromCache = append(clearFromCache, f.Id)
+	clearFromCache := []string{f.Id}
 
 	b := batch
 	if b == nil {
