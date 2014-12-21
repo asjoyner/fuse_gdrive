@@ -724,8 +724,8 @@ func (d *DriveDB) sync() {
 		c = <-d.changes
 		err := d.processChange(c)
 		if err != nil {
-			// TODO: figure out how to recover from the error.
-			log.Printf("sync error: %v", err)
+			// TODO: trigger reinit(), unless rate > N, then log.Fatal
+			log.Printf("error evaluating change from drive: %v", err)
 		}
 	}
 }
