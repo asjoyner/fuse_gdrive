@@ -164,3 +164,21 @@ func getOAuthClient(scope string) *http.Client {
 	}
 	return t.Client()
 }
+
+// This is a terrible but simple hack.  The better fix is coming.
+func tokenKicker(client *http.Client, interval time.Duration) {
+	transport, ok := client.Transport.(*oauth.Transport)
+	if !ok {
+		log.Println("tokenKicker client must be an oauth client!")
+		return
+	}
+	log.Printf("access token expires: %s\n", transport.Token.Expiry)
+	for {
+		time.Sleep(interval)
+		if err := transport.Refresh(); err != nil {
+			log.Println("access token refresh failure: ", err)
+		} else {
+			log.Printf("access token refreshed!  expires: %s\n", transport.Token.Expiry)
+		}
+	}
+}

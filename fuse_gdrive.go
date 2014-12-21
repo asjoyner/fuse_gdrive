@@ -126,6 +126,11 @@ func main() {
 	// email address of the mounted google drive account
 	account := about.User.EmailAddress
 
+	// Ensure the token's always fresh
+	// TODO: Remove this once goauth2 changes are accepted upstream
+	// https://code.google.com/p/goauth2/issues/detail?id=47
+	go tokenKicker(client, 59*time.Minute)
+
 	// Create and start the drive metadata syncer.
 	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
 	log.Printf("using drivedb: %v", dbpath)
