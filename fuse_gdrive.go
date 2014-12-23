@@ -26,11 +26,14 @@ import (
 	"github.com/asjoyner/fuse_gdrive/drive_db"
 )
 
-var port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
-var readOnly = flag.Bool("readonly", false, "Mount the filesystem read only.")
-var allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
-var debugGdrive = flag.Bool("gdrive.debug", false, "print debug statements from the fuse_gdrive package")
-var driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
+var (
+	port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
+	readOnly = flag.Bool("readonly", false, "Mount the filesystem read only.")
+	allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
+	debugGdrive = flag.Bool("gdrive.debug", false, "print debug statements from the fuse_gdrive package")
+	driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
+	numWorkers = flag.Int("workers", 10, "number of simultaneous operations to support")
+)
 
 var startup = time.Now()
 
@@ -180,6 +183,7 @@ func main() {
 		uid:  uid,
 		gid:  gid,
 		conn: c,
+		workers: *numWorkers,
 	}
 	err = sc.Serve()
 	if err != nil {

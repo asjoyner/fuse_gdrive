@@ -232,9 +232,8 @@ func (d *DriveDB) get(key []byte, item interface{}) error {
 // writeCheckpoint writes the checkpoint to the db, optionally using a batch.
 func (d *DriveDB) writeCheckpoint(batch *leveldb.Batch) error {
 	d.Lock()
-	cpt := d.cpt
+	bytes, err := encode(d.cpt)
 	d.Unlock()
-	bytes, err := encode(cpt)
 	if err != nil {
 		log.Printf("error encoding checkpoint: %v", err)
 		return err
@@ -626,7 +625,7 @@ func (d *DriveDB) pollForChanges() {
 	}
 }
 
-// readChanges is called by pollForChanges to grab all new metadata changes from Drive
+// readChanges is called by pollForChanges to grab all new metadata changes from Drive.
 func (d *DriveDB) readChanges() {
 	l := d.service.Changes.List().IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000)
 	lastChangeId := d.lastChangeId()

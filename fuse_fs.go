@@ -31,10 +31,18 @@ type serveConn struct {
 	uid        uint32 // uid of the user who mounted the FS
 	gid        uint32 // gid of the user who mounted the FS
 	conn       *fuse.Conn
+	workers    int
+	reqs       chan fuse.Request
 }
 
 // FuseServe receives and dispatches Requests from the kernel
 func (sc *serveConn) Serve() error {
+	sc.reqs = make(chan fuse.Request, sc.workers)
+	
+	for w := 1; w <= sc.workers; w++ {
+		go sc.worker()
+	} 
+	
 	for {
 		req, err := sc.conn.ReadRequest()
 		if err != nil {
@@ -45,9 +53,15 @@ func (sc *serveConn) Serve() error {
 		}
 
 		fuse.Debug(fmt.Sprintf("%+v", req))
-		go sc.serve(req)
+		sc.reqs <- req
 	}
 	return nil
+}
+
+func (sc *serveConn) worker() {
+	for {
+		sc.serve(<-sc.reqs)
+	}
 }
 
 func (sc *serveConn) serve(req fuse.Request) {
