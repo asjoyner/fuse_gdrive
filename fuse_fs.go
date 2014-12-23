@@ -45,12 +45,7 @@ func (sc *serveConn) Serve() error {
 		}
 
 		fuse.Debug(fmt.Sprintf("%+v", req))
-
-		// TODO: paralellize this, after I figure out why every parallel request
-		// causes a panic on null pointer dereference when responding to the one or
-		// the other request.
-		//go sc.serve(req)
-		sc.serve(req)
+		go sc.serve(req)
 	}
 	return nil
 }
