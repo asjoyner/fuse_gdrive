@@ -80,8 +80,8 @@ type CheckPoint struct {
 }
 
 type DownloadSpec struct {
-	fileId	string
-	chunk	int64
+	fileId   string
+	chunk    int64
 	filesize int64
 }
 
@@ -102,7 +102,7 @@ type DriveDB struct {
 	dbpath       string
 	rootId       string
 	driveSize    int64
-	pfetchq		 chan DownloadSpec
+	pfetchq      chan DownloadSpec
 }
 
 func openLevelDB(filepath string) (*leveldb.DB, error) {
@@ -831,7 +831,7 @@ func (d *DriveDB) chunkToDriveChunk(chunk int64) int64 {
 }
 
 func (d *DriveDB) driveChunkToChunk(dchunk int64) int64 {
-	return dchunk*d.driveSize/dbDataChunkSize
+	return dchunk * d.driveSize / dbDataChunkSize
 }
 
 // ReadFiledata reads a chunk of a file, possibly from cache.
@@ -878,10 +878,9 @@ func (d *DriveDB) clearDataCache(fileId string) {
 	d.db.Write(batch, nil)
 }
 
-
 // readChunk singleflights the read of a chunk of data from a drive file.
 func (d *DriveDB) readChunk(fileId string, chunk, filesize int64) ([]byte, error) {
-	if chunk * dbDataChunkSize > filesize {
+	if chunk*dbDataChunkSize > filesize {
 		return nil, fmt.Errorf("read past eof")
 	}
 	key := cacheMapKey(fileId, chunk)
@@ -1036,7 +1035,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 func (d *DriveDB) prefetcher() {
 	for {
 		select {
-		case s := <- d.pfetchq:
+		case s := <-d.pfetchq:
 			// See if the next chunk is already cached.
 			newchunk := d.chunkToDriveChunk(s.chunk) + 1
 			c := d.driveChunkToChunk(newchunk)
@@ -1054,6 +1053,7 @@ func (d *DriveDB) prefetcher() {
 		}
 	}
 }
+
 // readahead the next drive chunk if needed, async
 func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
 	// See if the next chunk is already cached.
@@ -1066,11 +1066,11 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
 	if err == nil {
 		return
 	}
-	
+
 	// if not, queue it.
 	d.pfetchq <- DownloadSpec{
-		fileId: fileId,
-		chunk: chunk,
+		fileId:   fileId,
+		chunk:    chunk,
 		filesize: filesize,
 	}
 }
@@ -1078,7 +1078,7 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
 // singleflight drive fetches.
 func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byte, error) {
 	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, chunk), func() (interface{}, error) {
-			return d.getChunkFromDriveImpl(fileId, chunk, filesize)
+		return d.getChunkFromDriveImpl(fileId, chunk, filesize)
 	})
 	return v.([]byte), err
 }
