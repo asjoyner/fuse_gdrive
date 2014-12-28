@@ -70,6 +70,7 @@ func sanityCheck(mountpoint string) error {
 }
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
 	runtime.SetBlockProfileRate(1)
 
 	flag.Usage = Usage

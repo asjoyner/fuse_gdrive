@@ -79,6 +79,12 @@ type CheckPoint struct {
 	CacheBlock   int64
 }
 
+type DownloadSpec struct {
+	fileId	string
+	chunk	int64
+	filesize int64
+}
+
 type DriveDB struct {
 	sync.Mutex
 	client       *http.Client
@@ -96,6 +102,7 @@ type DriveDB struct {
 	dbpath       string
 	rootId       string
 	driveSize    int64
+	pfetchq		 chan DownloadSpec
 }
 
 func openLevelDB(filepath string) (*leveldb.DB, error) {
@@ -148,6 +155,7 @@ func NewDriveDB(client *http.Client, filepath string, pollInterval time.Duration
 		dbpath:       filepath,
 		rootId:       rootId,
 		driveSize:    dbDataChunkSize * (*driveDataChunks), // ensure drive reads are always a multiple of cache size
+		pfetchq:      make(chan DownloadSpec, 20000),
 	}
 
 	// Get saved checkpoint.
@@ -181,6 +189,7 @@ func NewDriveDB(client *http.Client, filepath string, pollInterval time.Duration
 	if debug {
 		registerDebugHandles(*d) // in http_handlers.go
 	}
+	go d.prefetcher()
 	return d, nil
 }
 
@@ -247,6 +256,10 @@ func fileKey(key string) []byte {
 
 func childKey(key string) []byte {
 	return []byte("kid:" + key)
+}
+
+func cacheMapKeyPrefix(fileId string) []byte {
+	return []byte(fmt.Sprintf("cky:%s\\0", fileId))
 }
 
 func cacheMapKey(fileId string, chunk int64) []byte {
@@ -548,6 +561,8 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	}
 	// delete the file itself.
 	batch.Delete(fileKey(fileId))
+	// and its cached data.
+	d.clearDataCache(fileId)
 	// clear the inode cache.
 	inode, err := d.InodeForFileId(fileId)
 	if err == nil {
@@ -621,7 +636,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	// Maintain child references
 	for _, pr := range f.Parents {
 		debug.Printf("Adding parent: %v", pr.Id)
-		b.Put(childKey(pr.Id+":"+fileId), []byte{}) // we care only about the key
+		b.Put(childKey(pr.Id+":"+fileId), nil) // we care only about the key
 		clearFromCache = append(clearFromCache, pr.Id)
 		delete(oldParents, pr.Id)
 	}
@@ -650,6 +665,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	}
 
 	file := File{f, inode, nil, "", time.Time{}}
+	d.clearDataCache(fileId)
 	return &file, nil
 }
 
@@ -810,6 +826,14 @@ func (d *DriveDB) chunkNumbers(offset, size int64) (chunk0, chunkN int64) {
 	return
 }
 
+func (d *DriveDB) chunkToDriveChunk(chunk int64) int64 {
+	return chunk * dbDataChunkSize / d.driveSize
+}
+
+func (d *DriveDB) driveChunkToChunk(dchunk int64) int64 {
+	return dchunk*d.driveSize/dbDataChunkSize
+}
+
 // ReadFiledata reads a chunk of a file, possibly from cache.
 func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]byte, error) {
 	var ret []byte
@@ -823,9 +847,6 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 		}
 		ret = append(ret, data...)
 	}
-
-	// readahead the next drive chunk async
-	go d.readChunk(fileId, chunkN+(*driveDataChunks), filesize)
 
 	// We may have too much data here -- before offset and after end. Return an appropriate slice.
 	low := offset - chunk0*dbDataChunkSize
@@ -841,8 +862,28 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 	return buf, nil
 }
 
+func (d *DriveDB) clearDataCache(fileId string) {
+	var ids []string
+	d.iters.Add(1)
+	iter := d.db.NewIterator(util.BytesPrefix(cacheMapKeyPrefix(fileId)), nil)
+	for iter.Next() {
+		ids = append(ids, deKey(string(iter.Key())))
+	}
+	iter.Release()
+	d.iters.Done()
+	batch := new(leveldb.Batch)
+	for _, id := range ids {
+		batch.Delete([]byte(id))
+	}
+	d.db.Write(batch, nil)
+}
+
+
 // readChunk singleflights the read of a chunk of data from a drive file.
 func (d *DriveDB) readChunk(fileId string, chunk, filesize int64) ([]byte, error) {
+	if chunk * dbDataChunkSize > filesize {
+		return nil, fmt.Errorf("read past eof")
+	}
 	key := cacheMapKey(fileId, chunk)
 	v, err := d.sf.Do(string(key), func() (interface{}, error) {
 		return d.readChunkImpl(fileId, chunk, filesize)
@@ -965,29 +1006,21 @@ func (d *DriveDB) writeChunks(fileId string, drivechunk int64, data []byte) erro
 
 // readChunkImpl actually reads the data from either the db or drive.
 func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, error) {
+
 	data, err := d.readCacheBlock(fileId, chunk)
 	if err == nil {
+		d.prefetchDriveChunk(fileId, chunk, filesize)
 		return data, nil
 	}
 
-	// No cached block, so we fetch from drive.
-	f, err := d.FileByFileId(fileId)
-	if err != nil {
-		return []byte{}, err
-	}
-	url := d.FreshDownloadUrl(f)
 	// map to larger drive read size
-	dchunk := chunk * dbDataChunkSize / d.driveSize
-	// singleflight the actual Drive fetches.
-	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, dchunk), func() (interface{}, error) {
-		return d.getChunkFromDrive(url, dchunk, filesize)
-	})
+	dchunk := d.chunkToDriveChunk(chunk)
+	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
 	if err != nil {
 		log.Printf("error reading from drive: %v", err)
 		return nil, err
 	}
 
-	data = v.([]byte)
 	size := int64(len(data))
 	// map back to cache chunk size and extract the requested segment
 	start := chunk*dbDataChunkSize - dchunk*d.driveSize
@@ -996,11 +1029,67 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 		end = size
 	}
 	buf := data[start:end]
+	d.prefetchDriveChunk(fileId, chunk, filesize)
 	return buf, d.writeChunks(fileId, dchunk, data)
 }
 
-// getChunkFromDrive gets a drive-chunk (larger than cache-chunk) from Drive.
-func (d *DriveDB) getChunkFromDrive(url string, chunk, filesize int64) ([]byte, error) {
+func (d *DriveDB) prefetcher() {
+	for {
+		select {
+		case s := <- d.pfetchq:
+			// See if the next chunk is already cached.
+			newchunk := d.chunkToDriveChunk(s.chunk) + 1
+			c := d.driveChunkToChunk(newchunk)
+			_, err := d.readCacheBlock(s.fileId, c)
+			if err == nil {
+				continue
+			}
+			// if it isn't, get it.
+			data, err := d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
+			if err != nil {
+				log.Printf("prefetch error: %v", err)
+				continue
+			}
+			d.writeChunks(s.fileId, newchunk, data)
+		}
+	}
+}
+// readahead the next drive chunk if needed, async
+func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
+	// See if the next chunk is already cached.
+	newchunk := d.chunkToDriveChunk(chunk) + 1
+	if newchunk*d.driveSize > filesize {
+		return
+	}
+	c := d.driveChunkToChunk(newchunk)
+	_, err := d.readCacheBlock(fileId, c)
+	if err == nil {
+		return
+	}
+	
+	// if not, queue it.
+	d.pfetchq <- DownloadSpec{
+		fileId: fileId,
+		chunk: chunk,
+		filesize: filesize,
+	}
+}
+
+// singleflight drive fetches.
+func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byte, error) {
+	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, chunk), func() (interface{}, error) {
+			return d.getChunkFromDriveImpl(fileId, chunk, filesize)
+	})
+	return v.([]byte), err
+}
+
+// getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
+func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
+	f, err := d.FileByFileId(fileId)
+	if err != nil {
+		return nil, err
+	}
+	url := d.FreshDownloadUrl(f)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
