@@ -1,4 +1,4 @@
-// drive_sync syncs Google Drive metadata to a local LevelDB database and provides methods to query it.
+// drive_sync syncs Google Drive dbdata to a local LevelDB database and provides methods to query it.
 
 package drive_db
 
@@ -10,6 +10,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"path"
 	"sync"
 	"time"
 
@@ -23,15 +25,21 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
-const downloadUrlLifetime = time.Duration(time.Hour * 12)
+const (
+	downloadUrlLifetime = time.Duration(time.Hour * 12)
+	// https://developers.google.com/drive/web/folder
+	driveFolderMimeType string = "application/vnd.google-apps.folder"
+    checkpointVersion = 2
+	dbDataChunkSize = 256*1024  // bytes
+)
 
-// https://developers.google.com/drive/web/folder
-const driveFolderMimeType string = "application/vnd.google-apps.folder"
+var (
+	debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
+	logChanges = flag.Bool("drivedb.logchanges", false, "Log json encoded dbdata as it is fetched from Google Drive.")
+	driveDataChunks = flag.Int64("drivedb.fetchsize", 8*1024*1024/dbDataChunkSize, fmt.Sprintf("Chunks of %v bytes to read from drive at a time (readahead).", dbDataChunkSize))
+	cacheSize = flag.Int64("drivedb.maxcachesize", 1024*8, fmt.Sprintf("Chunks of %v bytes to cache from drive at a time.", dbDataChunkSize))
+)
 
-var debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
-var logChanges = flag.Bool("logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
-
-var checkpointVersion = 2
 
 type debugging bool
 
@@ -69,57 +77,78 @@ type CheckPoint struct {
 	LastChangeID int64
 	LastInode    uint64
 	Version      int
+	CacheBlock   int64
 }
 
 type DriveDB struct {
 	sync.Mutex
+	client       *http.Client
 	service      *gdrive.Service
 	db           *leveldb.DB
+	data         string  // root of cache directory
 	syncmu       sync.Mutex
 	synced       *sync.Cond
 	iters        sync.WaitGroup
 	cpt          CheckPoint
 	changes      chan *gdrive.ChangeList
-	lruCache     *lru.Cache // inode to *File
+	lruCache     *lru.Cache   // in-memory inode to *File cache
 	pollInterval time.Duration
 	sf           singleflight.Group
 	dbpath       string
 	rootId       string
+	driveSize    int64
 }
 
-// NewDriveDB creates a new DriveDB and starts syncing.
-func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration, rootId string) (*DriveDB, error) {
-	if *debugDriveDB {
-		debug = true
-	}
-
+func openLevelDB(filepath string) (*leveldb.DB, error) {
 	o := &opt.Options{
 		Filter: filter.NewBloomFilter(10),
 		Strict: opt.StrictAll,
 	}
 	db, err := leveldb.OpenFile(filepath, o)
-	if err != nil {
-		if _, ok := err.(*errors.ErrCorrupted); ok {
-			log.Printf("recovering leveldb: %v", err)
-			db, err = leveldb.RecoverFile(filepath, o)
-			if err != nil {
-				log.Printf("failed to recover leveldb: %v", err)
-				return nil, err
-			}
-		} else {
-			log.Printf("failed to open leveldb: %v", err)
+	if err == nil {
+		return db, nil
+	}
+	if _, ok := err.(*errors.ErrCorrupted); ok {
+		log.Printf("recovering leveldb: %v", err)
+		db, err = leveldb.RecoverFile(filepath, o)
+		if err != nil {
+			log.Printf("failed to recover leveldb: %v", err)
 			return nil, err
 		}
+		return db, nil
+	}
+	log.Printf("failed to open leveldb: %v", err)
+	return nil, err
+}
+
+// NewDriveDB creates a new DriveDB and starts syncing dbdata.
+func NewDriveDB(client *http.Client, filepath string, pollInterval time.Duration, rootId string) (*DriveDB, error) {
+	svc, _ := gdrive.New(client)
+	_, err := svc.About.Get().Do()
+	if err != nil {
+		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
+	}
+	
+	if *debugDriveDB {
+		debug = true
+	}
+
+	db, err := openLevelDB(path.Join(filepath, "meta"))
+	if err != nil {
+		return nil, err
 	}
 
 	d := &DriveDB{
+		client:       client,
 		service:      svc,
-		db:           db,
+		db:     db,
+		data:     path.Join(filepath, "data"),
 		lruCache:     lru.New(int(1000)), // make the value tunable
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
 		dbpath:       filepath,
 		rootId:       rootId,
+		driveSize:    dbDataChunkSize*(*driveDataChunks),  // ensure drive reads are always a multiple of cache size
 	}
 
 	// Get saved checkpoint.
@@ -156,10 +185,15 @@ func NewDriveDB(svc *gdrive.Service, filepath string, pollInterval time.Duration
 	return d, nil
 }
 
+func (d *DriveDB) Service() *gdrive.Service {
+	return d.service
+}
+
 func NewCheckpoint() CheckPoint {
 	return CheckPoint{
 		LastInode: 1000, // start high, to allow "special" inodes
 		Version:   checkpointVersion,
+		CacheBlock: 0,
 	}
 }
 
@@ -181,7 +215,7 @@ func (d *DriveDB) createRoot() error {
 	return err
 }
 
-// Delete all the stored metadata from Google Drive, preserving only the
+// Delete all the stored dbdata from Google Drive, preserving only the
 // mappings of fileid to inodes
 func (d *DriveDB) reinit() error {
 	d.Lock()
@@ -190,7 +224,7 @@ func (d *DriveDB) reinit() error {
 	d.cpt = NewCheckpoint() // recreate the checkpoint
 	d.cpt.LastInode = i     // restore the last Inode allocated
 	s := time.Now()
-	err := d.RemoveAllFiles() // blow away all of the metadata from Drive
+	err := d.RemoveAllFiles() // blow away all of the dbdata from Drive
 	debug.Printf("Removing all files took %v seconds.", time.Since(s))
 	return err
 }
@@ -214,6 +248,10 @@ func fileKey(key string) []byte {
 
 func childKey(key string) []byte {
 	return []byte("kid:" + key)
+}
+
+func cacheMapKey(fileId string, chunk int64) []byte {
+	return []byte(fmt.Sprintf("cky:%s\\0%d", fileId, chunk))
 }
 
 func deKey(key string) string {
@@ -268,6 +306,16 @@ func (d *DriveDB) nextInode(batch *leveldb.Batch) (uint64, error) {
 	inode = d.cpt.LastInode
 	d.Unlock()
 	return inode, d.writeCheckpoint(batch)
+}
+
+// nextCacheBlock allocates a new cache block number and updates, including writing to leveldb.
+func (d *DriveDB) nextCacheBlock(batch *leveldb.Batch) (int64, error) {
+	var block int64
+	d.Lock()
+	block = d.cpt.CacheBlock
+	d.cpt.CacheBlock++
+	d.Unlock()
+	return block, d.writeCheckpoint(batch)
 }
 
 // InodeForFileId returns a File's inode number, given its ID.
@@ -393,7 +441,7 @@ func (d *DriveDB) FileIdForInode(inode uint64) (string, error) {
 	return fileId, nil
 }
 
-// FileByInode
+// FileByInode returns a *File given an inode number
 func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	f, ok := d.lruCache.Get(inode)
 	if ok {
@@ -404,7 +452,16 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
+	file, err := d.FileByFileId(fileId)
+	if err != nil {
+		return nil, err
+	}
+	d.lruCache.Add(inode, file)
+	return file, nil
+}
 
+// FileByFileId returns a *File given a fileId
+func (d *DriveDB) FileByFileId(fileId string) (*File, error) {
 	gdriveFile, err := d.FileById(fileId)
 	if err != nil {
 		return nil, fmt.Errorf("unknown fileId %v: %v", fileId, err)
@@ -428,8 +485,6 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 		}
 		file.Children[i] = inode
 	}
-
-	d.lruCache.Add(inode, &file)
 	return &file, nil
 }
 
@@ -625,7 +680,7 @@ func (d *DriveDB) pollForChanges() {
 	}
 }
 
-// readChanges is called by pollForChanges to grab all new metadata changes from Drive.
+// readChanges is called by pollForChanges to grab all new dbdata changes from Drive.
 func (d *DriveDB) readChanges() {
 	l := d.service.Changes.List().IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000)
 	lastChangeId := d.lastChangeId()
@@ -741,4 +796,239 @@ func (d *DriveDB) Close() {
 	d.iters.Wait()
 	d.db.Close()
 	d.db = nil
+}
+
+// Data is read from drive and cached on disk. The Drive read size is intended to be larger
+// than the cache size, to account for higher latency to Drive than local disk.
+// Chunks of dbDataChunkSize are stored in files next to the leveldb. Records in the leveldb
+// point from FileID and chunk number to a cache file on disk. The disk cache works like a ring
+// buffer.
+
+// Map an offset and a size to low and high chunk numbers.
+func (d *DriveDB) chunkNumbers(offset, size int64) (chunk0, chunkN int64) {
+	chunk0 = offset / dbDataChunkSize  // lowest chunk number encompassing the offset
+	chunkN = (offset+size-1) / dbDataChunkSize  // highest chunk number, encompassing offset+size.
+	return 
+}
+
+// ReadFiledata reads a chunk of a file, possibly from cache.
+func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]byte, error) {
+	var ret []byte
+	// Read all the necessary chunks
+	chunk0, chunkN := d.chunkNumbers(offset, size)
+	for chunk := chunk0; chunk <= chunkN; chunk++ {
+		data, err := d.readChunk(fileId, chunk, filesize)
+		if err != nil {
+			log.Printf(" chunk %v read error: %v", chunk, err)
+			continue
+		}
+		ret = append(ret, data...)
+	}
+
+	// readahead the next drive chunk async
+	go d.readChunk(fileId, chunkN+(*driveDataChunks), filesize)
+
+	// We may have too much data here -- before offset and after end. Return an appropriate slice.
+	low := offset - chunk0*dbDataChunkSize
+	if low < 0 { low = 0 }
+	high := low + size
+	dsize := int64(len(ret))
+	if high > dsize {
+		high = dsize
+	}
+	buf := ret[low:high]
+	return buf, nil
+}
+
+// readChunk singleflights the read of a chunk of data from a drive file.
+func (d *DriveDB) readChunk(fileId string, chunk, filesize int64) ([]byte, error) {
+	key := cacheMapKey(fileId, chunk)
+	v, err := d.sf.Do(string(key), func() (interface{}, error) {
+		return d.readChunkImpl(fileId, chunk, filesize)
+	})
+	return v.([]byte), err
+}
+
+// blockFilename returns the filename at which a cache block can be found.
+// It creates directories as needed.
+func (d *DriveDB) blockFilename(block int64) (string, error) {
+	keysize := len(fmt.Sprintf("%d", *cacheSize))
+	f := fmt.Sprintf("%%0%dd", keysize)
+	b := fmt.Sprintf(f, block)
+	dir := path.Join(d.data, b[:keysize/2])
+	err := os.MkdirAll(dir, 0700)
+	if err != nil {
+		return "", err
+	}
+	p := path.Join(dir, b)
+	return p, nil
+}
+
+func (d *DriveDB) writeCacheBlock(batch *leveldb.Batch, fileId string, chunk int64, data []byte) error {
+	// See if there's an existing block.
+	cacheKey := cacheMapKey(fileId, chunk)
+	var block int64
+	err := d.get(cacheKey, &block)
+	if err != nil {
+		// get a new block number
+		block, err = d.nextCacheBlock(batch)
+		if err != nil {
+			return fmt.Errorf("block allocation failed: %v", err)
+		}
+		bytes, err := encode(block)
+		if err != nil {
+			return fmt.Errorf("block encode failed: %v", err)
+		}
+		batch.Put(cacheKey, bytes)
+	}
+	name, err := d.blockFilename(block)
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	written, err := f.Write(cacheKey)
+	if err != nil || written != len(cacheKey) {
+		return fmt.Errorf("failed to write cache chunk %v of %s", chunk, fileId)
+	}
+	written, err = f.Write(data)
+	if err != nil || written != len(data) {
+		return fmt.Errorf("failed to write cache chunk %v of %s", chunk, fileId)
+	}
+	return nil
+}
+
+func (d *DriveDB) readCacheBlock(fileId string, chunk int64) ([]byte, error) {
+	// Check the db for a cache chunk
+	cacheKey := cacheMapKey(fileId, chunk)
+	var block int64
+	err := d.get(cacheKey, &block)
+	if err != nil {
+		return nil, err
+	}
+	// Try to read the file.
+	name, err := d.blockFilename(block)
+	if err != nil {
+		_ = d.db.Delete(cacheKey, nil)
+		return nil, err
+	}
+	data, err := ioutil.ReadFile(name)
+	if err != nil {
+		_ = d.db.Delete(cacheKey, nil)
+		return nil, err
+	}
+	if len(data) <= len(cacheKey) {
+		_ = d.db.Delete(cacheKey, nil)
+		return nil, fmt.Errorf("empty block? %s, %v", fileId, chunk)
+	}
+	// Check for the fileId
+	if bytes.Compare(data[:len(cacheKey)], cacheKey) != 0 {
+		_ = d.db.Delete(cacheKey, nil)
+		return nil, fmt.Errorf("mismatched fileId in cache chunk: %s, %v", fileId, chunk)
+	}
+	return data[len(cacheKey):], nil
+}
+
+func (d *DriveDB) writeChunks(fileId string, drivechunk int64, data []byte) error {
+	size := len(data)
+	if size == 0 {
+		return nil
+	}
+	// Split up the retrieved chunk into dbDataChunkSize segments and store them in the cache.
+	chunks := size / dbDataChunkSize
+	batch := new(leveldb.Batch)
+	basechunk := (drivechunk*d.driveSize) / dbDataChunkSize
+	for c := 0; c <= chunks; c++ {
+		// base chunk number plus current block number
+		cnum := basechunk + int64(c)
+		// data segment
+		start := int64(c)*dbDataChunkSize
+		end := int64(c+1)*dbDataChunkSize
+		if end > int64(size) {
+			end = int64(size)
+		}
+		if start >= end {
+			continue
+		}
+		datasegment := data[start:end]
+		err := d.writeCacheBlock(batch, fileId, cnum, datasegment)
+		if err != nil {
+			return err
+		}
+	}
+	return d.db.Write(batch, nil)
+}
+
+// readChunkImpl actually reads the data from either the db or drive.
+func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, error) {
+	data, err := d.readCacheBlock(fileId, chunk)
+	if err == nil {
+		return data, nil
+	}
+	
+	// No cached block, so we fetch from drive.
+	f, err := d.FileByFileId(fileId)
+	if err != nil {
+		return []byte{}, err
+	}
+	url := d.FreshDownloadUrl(f)
+	// map to larger drive read size
+	dchunk := chunk*dbDataChunkSize/d.driveSize
+	// singleflight the actual Drive fetches.
+	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, dchunk), func() (interface{}, error) {
+		return d.getChunkFromDrive(url, dchunk, filesize)
+	})
+	if err != nil {
+		log.Printf("error reading from drive: %v", err)
+		return nil, err
+	}
+	
+	data = v.([]byte)
+	size := int64(len(data))
+	// map back to cache chunk size and extract the requested segment
+	start := chunk*dbDataChunkSize - dchunk*d.driveSize
+	end := start + int64(dbDataChunkSize)
+	if end > size {
+		end = size
+	}
+	buf := data[start:end]
+	return buf, d.writeChunks(fileId, dchunk, data)
+}
+
+// getChunkFromDrive gets a drive-chunk (larger than cache-chunk) from Drive.
+func (d *DriveDB) getChunkFromDrive(url string, chunk, filesize int64) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	// See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
+	// https://developers.google.com/drive/web/manage-downloads#partial_download
+	start := chunk*d.driveSize
+	if start > filesize {
+		return nil, fmt.Errorf("chunk %v: requested %v, after EOF %v", chunk, start, filesize)
+	}
+	end := (chunk+1)*d.driveSize - 1
+	if end > filesize {
+		end = filesize
+	}
+	spec := fmt.Sprintf("bytes=%d-%d", start, end)
+	req.Header.Add("Range", spec)
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client.Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 206 && resp.StatusCode != 200 {
+		err := fmt.Errorf("for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
+		return nil, err
+	}
+	chunkBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
+	}
+	return chunkBytes, nil
 }

@@ -32,7 +32,6 @@ var (
 	allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
 	debugGdrive = flag.Bool("gdrive.debug", false, "print debug statements from the fuse_gdrive package")
 	driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
-	numWorkers = flag.Int("workers", 10, "number of simultaneous operations to support")
 )
 
 var startup = time.Now()
@@ -117,13 +116,12 @@ func main() {
 
 	driveCache := cache.NewCache("/tmp", client)
 
-	// TODO: retries
+	// TODO: move into drivedb, so we don't create a service twice
 	service, _ := drive.New(client)
 	about, err := service.About.Get().Do()
 	if err != nil {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
-
 	// fileId of the root of the FS (aka "My Drive")
 	rootId := about.RootFolderId
 	// email address of the mounted google drive account
@@ -135,15 +133,16 @@ func main() {
 	go tokenKicker(client, 59*time.Minute)
 
 	// Create and start the drive metadata syncer.
-	dbpath := path.Join(os.TempDir(), "fuse-gdrive", about.User.EmailAddress)
+	dbpath := path.Join(os.TempDir(), "fuse-gdrive", account)
 	log.Printf("using drivedb: %v", dbpath)
-	db, err := drive_db.NewDriveDB(service, dbpath, *driveMetadataLatency, rootId)
+	db, err := drive_db.NewDriveDB(client, dbpath, *driveMetadataLatency, rootId)
 	if err != nil {
 		log.Fatalf("could not open leveldb: %v", err)
 	}
 	defer db.Close()
 	db.WaitUntilSynced()
 	log.Printf("synced!")
+
 
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),
@@ -183,7 +182,6 @@ func main() {
 		uid:  uid,
 		gid:  gid,
 		conn: c,
-		workers: *numWorkers,
 	}
 	err = sc.Serve()
 	if err != nil {
