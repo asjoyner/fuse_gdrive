@@ -27,10 +27,10 @@ import (
 )
 
 var (
-	port = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
-	readOnly = flag.Bool("readonly", false, "Mount the filesystem read only.")
-	allowOther = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
-	debugGdrive = flag.Bool("gdrive.debug", false, "print debug statements from the fuse_gdrive package")
+	port                 = flag.String("port", "12345", "HTTP Server port; your browser will send credentials here.  Must be accessible to your browser, and authorized in the developer console.")
+	readOnly             = flag.Bool("readonly", false, "Mount the filesystem read only.")
+	allowOther           = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
+	debugGdrive          = flag.Bool("gdrive.debug", false, "print debug statements from the fuse_gdrive package")
 	driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
 )
 
@@ -142,7 +142,6 @@ func main() {
 	defer db.Close()
 	db.WaitUntilSynced()
 	log.Printf("synced!")
-
 
 	options := []fuse.MountOption{
 		fuse.FSName("GoogleDrive"),

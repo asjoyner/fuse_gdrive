@@ -29,17 +29,16 @@ const (
 	downloadUrlLifetime = time.Duration(time.Hour * 12)
 	// https://developers.google.com/drive/web/folder
 	driveFolderMimeType string = "application/vnd.google-apps.folder"
-    checkpointVersion = 2
-	dbDataChunkSize = 256*1024  // bytes
+	checkpointVersion          = 2
+	dbDataChunkSize            = 256 * 1024 // bytes
 )
 
 var (
-	debugDriveDB = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
-	logChanges = flag.Bool("drivedb.logchanges", false, "Log json encoded dbdata as it is fetched from Google Drive.")
+	debugDriveDB    = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
+	logChanges      = flag.Bool("drivedb.logchanges", false, "Log json encoded dbdata as it is fetched from Google Drive.")
 	driveDataChunks = flag.Int64("drivedb.fetchsize", 8*1024*1024/dbDataChunkSize, fmt.Sprintf("Chunks of %v bytes to read from drive at a time (readahead).", dbDataChunkSize))
-	cacheSize = flag.Int64("drivedb.maxcachesize", 1024*8, fmt.Sprintf("Chunks of %v bytes to cache from drive at a time.", dbDataChunkSize))
+	cacheSize       = flag.Int64("drivedb.maxcachesize", 1024*8, fmt.Sprintf("Chunks of %v bytes to cache from drive at a time.", dbDataChunkSize))
 )
-
 
 type debugging bool
 
@@ -85,13 +84,13 @@ type DriveDB struct {
 	client       *http.Client
 	service      *gdrive.Service
 	db           *leveldb.DB
-	data         string  // root of cache directory
+	data         string // root of cache directory
 	syncmu       sync.Mutex
 	synced       *sync.Cond
 	iters        sync.WaitGroup
 	cpt          CheckPoint
 	changes      chan *gdrive.ChangeList
-	lruCache     *lru.Cache   // in-memory inode to *File cache
+	lruCache     *lru.Cache // in-memory inode to *File cache
 	pollInterval time.Duration
 	sf           singleflight.Group
 	dbpath       string
@@ -128,7 +127,7 @@ func NewDriveDB(client *http.Client, filepath string, pollInterval time.Duration
 	if err != nil {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
-	
+
 	if *debugDriveDB {
 		debug = true
 	}
@@ -141,14 +140,14 @@ func NewDriveDB(client *http.Client, filepath string, pollInterval time.Duration
 	d := &DriveDB{
 		client:       client,
 		service:      svc,
-		db:     db,
-		data:     path.Join(filepath, "data"),
+		db:           db,
+		data:         path.Join(filepath, "data"),
 		lruCache:     lru.New(int(1000)), // make the value tunable
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
 		dbpath:       filepath,
 		rootId:       rootId,
-		driveSize:    dbDataChunkSize*(*driveDataChunks),  // ensure drive reads are always a multiple of cache size
+		driveSize:    dbDataChunkSize * (*driveDataChunks), // ensure drive reads are always a multiple of cache size
 	}
 
 	// Get saved checkpoint.
@@ -191,8 +190,8 @@ func (d *DriveDB) Service() *gdrive.Service {
 
 func NewCheckpoint() CheckPoint {
 	return CheckPoint{
-		LastInode: 1000, // start high, to allow "special" inodes
-		Version:   checkpointVersion,
+		LastInode:  1000, // start high, to allow "special" inodes
+		Version:    checkpointVersion,
 		CacheBlock: 0,
 	}
 }
@@ -806,9 +805,9 @@ func (d *DriveDB) Close() {
 
 // Map an offset and a size to low and high chunk numbers.
 func (d *DriveDB) chunkNumbers(offset, size int64) (chunk0, chunkN int64) {
-	chunk0 = offset / dbDataChunkSize  // lowest chunk number encompassing the offset
-	chunkN = (offset+size-1) / dbDataChunkSize  // highest chunk number, encompassing offset+size.
-	return 
+	chunk0 = offset / dbDataChunkSize              // lowest chunk number encompassing the offset
+	chunkN = (offset + size - 1) / dbDataChunkSize // highest chunk number, encompassing offset+size.
+	return
 }
 
 // ReadFiledata reads a chunk of a file, possibly from cache.
@@ -830,7 +829,9 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 
 	// We may have too much data here -- before offset and after end. Return an appropriate slice.
 	low := offset - chunk0*dbDataChunkSize
-	if low < 0 { low = 0 }
+	if low < 0 {
+		low = 0
+	}
 	high := low + size
 	dsize := int64(len(ret))
 	if high > dsize {
@@ -940,13 +941,13 @@ func (d *DriveDB) writeChunks(fileId string, drivechunk int64, data []byte) erro
 	// Split up the retrieved chunk into dbDataChunkSize segments and store them in the cache.
 	chunks := size / dbDataChunkSize
 	batch := new(leveldb.Batch)
-	basechunk := (drivechunk*d.driveSize) / dbDataChunkSize
+	basechunk := (drivechunk * d.driveSize) / dbDataChunkSize
 	for c := 0; c <= chunks; c++ {
 		// base chunk number plus current block number
 		cnum := basechunk + int64(c)
 		// data segment
-		start := int64(c)*dbDataChunkSize
-		end := int64(c+1)*dbDataChunkSize
+		start := int64(c) * dbDataChunkSize
+		end := int64(c+1) * dbDataChunkSize
 		if end > int64(size) {
 			end = int64(size)
 		}
@@ -968,7 +969,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 	if err == nil {
 		return data, nil
 	}
-	
+
 	// No cached block, so we fetch from drive.
 	f, err := d.FileByFileId(fileId)
 	if err != nil {
@@ -976,7 +977,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 	}
 	url := d.FreshDownloadUrl(f)
 	// map to larger drive read size
-	dchunk := chunk*dbDataChunkSize/d.driveSize
+	dchunk := chunk * dbDataChunkSize / d.driveSize
 	// singleflight the actual Drive fetches.
 	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, dchunk), func() (interface{}, error) {
 		return d.getChunkFromDrive(url, dchunk, filesize)
@@ -985,7 +986,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 		log.Printf("error reading from drive: %v", err)
 		return nil, err
 	}
-	
+
 	data = v.([]byte)
 	size := int64(len(data))
 	// map back to cache chunk size and extract the requested segment
@@ -1006,7 +1007,7 @@ func (d *DriveDB) getChunkFromDrive(url string, chunk, filesize int64) ([]byte, 
 	}
 	// See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
 	// https://developers.google.com/drive/web/manage-downloads#partial_download
-	start := chunk*d.driveSize
+	start := chunk * d.driveSize
 	if start > filesize {
 		return nil, fmt.Errorf("chunk %v: requested %v, after EOF %v", chunk, start, filesize)
 	}
