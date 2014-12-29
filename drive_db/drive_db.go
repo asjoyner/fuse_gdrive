@@ -35,7 +35,7 @@ const (
 
 var (
 	debugDriveDB    = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
-	logChanges      = flag.Bool("drivedb.logchanges", false, "Log json encoded dbdata as it is fetched from Google Drive.")
+	logChanges      = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 	driveDataChunks = flag.Int64("drivedb.fetchsize", 8*1024*1024/dbDataChunkSize, fmt.Sprintf("Chunks of %v bytes to read from drive at a time (readahead).", dbDataChunkSize))
 	cacheSize       = flag.Int64("drivedb.maxcachesize", 1024*8, fmt.Sprintf("Chunks of %v bytes to cache from drive at a time.", dbDataChunkSize))
 )
