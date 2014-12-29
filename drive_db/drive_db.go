@@ -223,8 +223,9 @@ func (d *DriveDB) createRoot() error {
 	return err
 }
 
-// Delete all the stored dbdata from Google Drive, preserving only the
-// mappings of fileid to inodes
+// Delete all the stored metadata from Google Drive, preserving only the
+// mappings of fileid to inodes. Cached chunks are left behind, but the
+// blocks will be recycled.
 func (d *DriveDB) reinit() error {
 	d.Lock()
 	defer d.Unlock()
@@ -232,7 +233,7 @@ func (d *DriveDB) reinit() error {
 	d.cpt = NewCheckpoint() // recreate the checkpoint
 	d.cpt.LastInode = i     // restore the last Inode allocated
 	s := time.Now()
-	err := d.RemoveAllFiles() // blow away all of the dbdata from Drive
+	err := d.RemoveAllFiles() // blow away all of the metadata from Drive
 	debug.Printf("Removing all files took %v seconds.", time.Since(s))
 	return err
 }
@@ -863,6 +864,8 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 	return buf, nil
 }
 
+// clearDataCache removes the leveldb block cache records, but leaves the actual
+// blocks on disk. The blocks will be recycled, so this ok.
 func (d *DriveDB) clearDataCache(fileId string) {
 	var ids []string
 	d.iters.Add(1)
