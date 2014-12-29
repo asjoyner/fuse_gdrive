@@ -1,4 +1,4 @@
-// drive_sync syncs Google Drive dbdata to a local LevelDB database and provides methods to query it.
+// drive_sync syncs Google Drive metadata to a local LevelDB database and provides methods to query it.
 
 package drive_db
 
@@ -127,7 +127,7 @@ func openLevelDB(filepath string) (*leveldb.DB, error) {
 	return nil, err
 }
 
-// NewDriveDB creates a new DriveDB and starts syncing dbdata.
+// NewDriveDB creates a new DriveDB and starts syncing metadata.
 func NewDriveDB(client *http.Client, filepath string, pollInterval time.Duration, rootId string) (*DriveDB, error) {
 	svc, _ := gdrive.New(client)
 	_, err := svc.About.Get().Do()
@@ -697,7 +697,7 @@ func (d *DriveDB) pollForChanges() {
 	}
 }
 
-// readChanges is called by pollForChanges to grab all new dbdata changes from Drive.
+// readChanges is called by pollForChanges to grab all new metadata changes from Drive.
 func (d *DriveDB) readChanges() {
 	l := d.service.Changes.List().IncludeDeleted(true).IncludeSubscribed(true).MaxResults(1000)
 	lastChangeId := d.lastChangeId()
