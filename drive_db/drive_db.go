@@ -282,8 +282,9 @@ func (d *DriveDB) get(key []byte, item interface{}) error {
 // writeCheckpoint writes the checkpoint to the db, optionally using a batch.
 func (d *DriveDB) writeCheckpoint(batch *leveldb.Batch) error {
 	d.Lock()
-	bytes, err := encode(d.cpt)
+	cpt := d.cpt
 	d.Unlock()
+	bytes, err := encode(cpt)
 	if err != nil {
 		log.Printf("error encoding checkpoint: %v", err)
 		return err
@@ -867,7 +868,7 @@ func (d *DriveDB) clearDataCache(fileId string) {
 	d.iters.Add(1)
 	iter := d.db.NewIterator(util.BytesPrefix(cacheMapKeyPrefix(fileId)), nil)
 	for iter.Next() {
-		ids = append(ids, deKey(string(iter.Key())))
+		ids = append(ids, string(iter.Key()))
 	}
 	iter.Release()
 	d.iters.Done()
