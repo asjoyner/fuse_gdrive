@@ -327,7 +327,7 @@ func (d *DriveDB) nextCacheBlock(batch *leveldb.Batch) (int64, error) {
 	var block int64
 	d.Lock()
 	block = d.cpt.CacheBlock
-	d.cpt.CacheBlock++
+	d.cpt.CacheBlock = (d.cpt.CacheBlock + 1) % *cacheSize
 	d.Unlock()
 	return block, d.writeCheckpoint(batch)
 }
@@ -899,7 +899,7 @@ func (d *DriveDB) readChunk(fileId string, chunk, filesize int64) ([]byte, error
 func (d *DriveDB) blockFilename(block int64) (string, error) {
 	keysize := len(fmt.Sprintf("%d", *cacheSize))
 	f := fmt.Sprintf("%%0%dd", keysize)
-	b := fmt.Sprintf(f, block)
+	b := fmt.Sprintf(f, block % *cacheSize)
 	dir := path.Join(d.data, b[:keysize/2])
 	err := os.MkdirAll(dir, 0700)
 	if err != nil {
