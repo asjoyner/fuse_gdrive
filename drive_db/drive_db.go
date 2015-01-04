@@ -33,11 +33,13 @@ const (
 )
 
 var (
-	debugDriveDB     = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
-	logChanges       = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
-	driveCacheChunk  = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
-	driveCacheChunks = flag.Int64("drivedb.fetchsize", 32, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size).")
-	cacheSize        = flag.Int64("drivedb.maxcachesize", 1024*16, "Chunks of --drivedb.cachechunk bytes to cache from drive at a time.")
+	debugDriveDB       = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
+	logChanges         = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
+	driveCacheChunk    = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
+	driveCacheChunks   = flag.Int64("drivedb.fetchsize", 32, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size).")
+	cacheSize          = flag.Int64("drivedb.maxcachesize", 1024*16, "Chunks of --drivedb.cachechunk bytes to cache from drive at a time.")
+	prefetchThreshold  = flag.Int64("drivedb.prefetchthreshold", 1024*1024*1024, "readahead multiplied by --drivedb.prefetchmultiplier for files over this size")
+	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 2, "readahead multiplier")
 )
 
 type debugging bool
@@ -103,6 +105,7 @@ type DriveDB struct {
 	rootId       string
 	driveSize    int64
 	pfetchq      chan DownloadSpec
+	pfetchmap    map[string]bool
 }
 
 func openLevelDB(filepath string) (*leveldb.DB, error) {
@@ -169,6 +172,7 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		rootId:       rootId,
 		driveSize:    (*driveCacheChunk) * (*driveCacheChunks), // ensure drive reads are always a multiple of cache size
 		pfetchq:      make(chan DownloadSpec, 20000),
+		pfetchmap:    make(map[string]bool),
 	}
 
 	// Get saved checkpoint.
@@ -1054,41 +1058,73 @@ func (d *DriveDB) prefetcher() {
 		select {
 		case s := <-d.pfetchq:
 			// See if the next chunk is already cached.
-			newchunk := d.chunkToDriveChunk(s.chunk) + 1
+			newchunk := s.chunk
+			key := fmt.Sprintf("%s:%d", s.fileId, newchunk)
 			c := d.driveChunkToChunk(newchunk)
+			// if it's already cached, return early
 			_, err := d.readCacheBlock(s.fileId, c)
 			if err == nil {
+				d.Lock()
+				delete(d.pfetchmap, key)
+				d.Unlock()
 				continue
 			}
 			// if it isn't, get it.
 			data, err := d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
 			if err != nil {
 				log.Printf("prefetch error: %v", err)
+				d.Lock()
+				delete(d.pfetchmap, key)
+				d.Unlock()
 				continue
 			}
 			d.writeChunks(s.fileId, newchunk, data)
+			d.Lock()
+			delete(d.pfetchmap, key)
+			d.Unlock()
 		}
 	}
 }
 
 // readahead the next drive chunk if needed, async
 func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
-	// See if the next chunk is already cached.
-	newchunk := d.chunkToDriveChunk(chunk) + 1
-	if newchunk*d.driveSize > filesize {
-		return
-	}
-	c := d.driveChunkToChunk(newchunk)
-	_, err := d.readCacheBlock(fileId, c)
-	if err == nil {
-		return
+	// prefetch multiple blocks at a time if a file is more than "so big"
+	chunks := 1
+	if filesize > *prefetchThreshold {
+		chunks = int(*prefetchMultiplier)
 	}
 
-	// if not, queue it.
-	d.pfetchq <- DownloadSpec{
-		fileId:   fileId,
-		chunk:    chunk,
-		filesize: filesize,
+	for cnk := 1; cnk <= chunks; cnk++ {
+		newchunk := d.chunkToDriveChunk(chunk) + int64(cnk)
+		// past eof? don't do anything silly.
+		if newchunk*d.driveSize > filesize {
+			return
+		}
+		// already in the prefetch map? do nothing.
+		key := fmt.Sprintf("%s:%d", fileId, newchunk)
+		d.Lock()
+		queued := d.pfetchmap[key]
+		d.Unlock()
+		if queued {
+			return
+		}
+
+		// already on disk? do nothing.
+		c := d.driveChunkToChunk(newchunk)
+		_, err := d.readCacheBlock(fileId, c)
+		if err == nil {
+			return
+		}
+
+		// add it to the map and queue the fetch
+		d.Lock()
+		d.pfetchmap[key] = true
+		d.Unlock()
+		d.pfetchq <- DownloadSpec{
+			fileId:   fileId,
+			chunk:    newchunk,
+			filesize: filesize,
+		}
 	}
 }
 
