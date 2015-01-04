@@ -32,6 +32,8 @@ var (
 	allowOther           = flag.Bool("allow_other", false, "If other users are allowed to view the mounted filesystem.")
 	debugGdrive          = flag.Bool("gdrive.debug", false, "print debug statements from the fuse_gdrive package")
 	driveMetadataLatency = flag.Duration("metadatapoll", time.Minute, "How often to poll Google Drive for metadata updates")
+	dbDir                = flag.String("gdrive.datadir", osDataDir(), "Where to store the drive database")
+	cacheDir             = flag.String("gdrive.cachedir", osCacheDir(), "Where to store the drive data cache")
 )
 
 var startup = time.Now()
@@ -50,6 +52,28 @@ var Usage = func() {
 	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s MOUNTPOINT\n", os.Args[0])
 	flag.PrintDefaults()
+}
+
+func osCacheDir() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return path.Join(os.Getenv("HOME"), "Library", "Caches", "gdrive-fuse")
+	case "linux", "freebsd":
+		return path.Join(os.Getenv("HOME"), ".gdrive-fuse-cache")
+	}
+	log.Printf("TODO: osUserCacheDir on GOOS %q", runtime.GOOS)
+	return ".gdrive-fuse-cache"
+}
+
+func osDataDir() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return path.Join(os.Getenv("HOME"), "Library", "Application Support", "gdrive-fuse")
+	case "linux", "freebsd":
+		return path.Join(os.Getenv("HOME"), ".gdrive-fuse-db")
+	}
+	log.Printf("TODO: osUserCacheDir on GOOS %q", runtime.GOOS)
+	return ".gdrive-fuse-db"
 }
 
 func sanityCheck(mountpoint string) error {
@@ -134,9 +158,7 @@ func main() {
 	go tokenKicker(client, 59*time.Minute)
 
 	// Create and start the drive metadata syncer.
-	dbpath := path.Join(os.TempDir(), "fuse-gdrive", account)
-	log.Printf("using drivedb: %v", dbpath)
-	db, err := drive_db.NewDriveDB(client, dbpath, *driveMetadataLatency, rootId)
+	db, err := drive_db.NewDriveDB(client, *dbDir, *cacheDir, *driveMetadataLatency, rootId)
 	if err != nil {
 		log.Fatalf("could not open leveldb: %v", err)
 	}
