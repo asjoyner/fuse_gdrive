@@ -218,13 +218,12 @@ func (sc *serveConn) read(req *fuse.ReadRequest) {
 		req.RespondError(fuse.EIO)
 		return
 	}
-	url := sc.db.FreshDownloadUrl(f)
+	url := sc.db.FreshDownloadUrl(f.Id)
 	if url == "" { // If there is no url, the file has no body
 		req.RespondError(io.EOF)
 		return
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, req.Offset, req.Size)
-	//resp.Data, err = sc.driveCache.Read(url, req.Offset, int64(req.Size), f.FileSize)
 	resp.Data, err = sc.db.ReadFiledata(f.Id, req.Offset, int64(req.Size), f.FileSize)
 	if err != nil && err != io.EOF {
 		debug.Printf("driveCache.Read (..%v..): %v", req.Offset, err)
@@ -322,7 +321,6 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 		req.RespondError(fuse.EIO)
 		return
 	}
-	sc.db.FlushCachedInode(pInode)
 	resp := &fuse.MkdirResponse{}
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency
@@ -359,7 +357,6 @@ func (sc *serveConn) remove(req *fuse.RemoveRequest) {
 		if child.Title == req.Name {
 			sc.service.Files.Delete(child.Id).Do()
 			sc.db.RemoveFileById(child.Id, nil)
-			sc.db.FlushCachedInode(pInode)
 			req.Respond()
 			return
 		}

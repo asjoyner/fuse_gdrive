@@ -36,10 +36,9 @@ var (
 	debugDriveDB       = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
 	logChanges         = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 	driveCacheChunk    = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
-	driveCacheChunks   = flag.Int64("drivedb.fetchsize", 32, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size).")
+	driveCacheChunks   = flag.Int64("drivedb.fetchsize", 16, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size; see also --drivedb.prefetchmultiplier).")
 	cacheSize          = flag.Int64("drivedb.maxcachesize", 1024*16, "Chunks of --drivedb.cachechunk bytes to cache from drive at a time.")
-	prefetchThreshold  = flag.Int64("drivedb.prefetchthreshold", 1024*1024*1024, "readahead multiplied by --drivedb.prefetchmultiplier for files over this size")
-	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 2, "readahead multiplier")
+	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 4, "readahead multiplier; --drivedb.fetchsize chunks are fetched in sequence")
 )
 
 type debugging bool
@@ -68,10 +67,8 @@ func decode(data []byte, item interface{}) error {
 
 type File struct {
 	*gdrive.File
-	Inode                 uint64
-	Children              []uint64 // inodes of children
-	cachedDownloadUrl     string
-	cachedDownloadUrlTime time.Time
+	Inode    uint64
+	Children []uint64 // inodes of children
 }
 
 type CheckPoint struct {
@@ -87,18 +84,23 @@ type DownloadSpec struct {
 	filesize int64
 }
 
+type DownloadURL struct {
+	URL  string
+	When int64 // epoch time
+}
+
 type DriveDB struct {
 	sync.Mutex
 	client       *http.Client
 	service      *gdrive.Service
 	db           *leveldb.DB
-	data         string // root of cache directory
+	data         string     // root of data cache directory
+	lruCache     *lru.Cache // in-memory inode to *File cache
 	syncmu       sync.Mutex
 	synced       *sync.Cond
 	iters        sync.WaitGroup
 	cpt          CheckPoint
 	changes      chan *gdrive.ChangeList
-	lruCache     *lru.Cache // in-memory inode to *File cache
 	pollInterval time.Duration
 	sf           singleflight.Group
 	dbpath       string
@@ -270,6 +272,10 @@ func inodeToFileIdKey(key uint64) []byte {
 
 func fileKey(key string) []byte {
 	return []byte("fid:" + key)
+}
+
+func downloadUrlKey(key string) []byte {
+	return []byte("url:" + key)
 }
 
 func childKey(key string) []byte {
@@ -474,8 +480,7 @@ func (d *DriveDB) FileIdForInode(inode uint64) (string, error) {
 
 // FileByInode returns a *File given an inode number
 func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
-	f, ok := d.lruCache.Get(inode)
-	if ok {
+	if f, ok := d.lruCache.Get(inode); ok {
 		return f.(*File), nil
 	}
 
@@ -487,6 +492,7 @@ func (d *DriveDB) FileByInode(inode uint64) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	d.lruCache.Add(inode, file)
 	return file, nil
 }
@@ -498,7 +504,7 @@ func (d *DriveDB) FileByFileId(fileId string) (*File, error) {
 		return nil, fmt.Errorf("unknown fileId %v: %v", fileId, err)
 	}
 
-	file := File{gdriveFile, 0, nil, "", time.Time{}}
+	file := File{gdriveFile, 0, nil}
 	file.Inode, err = d.InodeForFileId(fileId)
 	if err != nil {
 		return nil, fmt.Errorf("no inode for %v: %v", fileId, err)
@@ -512,6 +518,7 @@ func (d *DriveDB) FileByFileId(fileId string) (*File, error) {
 	for i, fileId := range childFileIds {
 		inode, err := d.InodeForFileId(fileId)
 		if err != nil {
+			d.lruCache.Remove(inode)
 			return nil, fmt.Errorf("error getting inode of child %v: %v", fileId, err)
 		}
 		file.Children[i] = inode
@@ -530,23 +537,36 @@ func (d *DriveDB) Refresh(fileId string) (*File, error) {
 
 // The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
 // hint: "403 Forbidden" is returned when it has expired
-func (d *DriveDB) FreshDownloadUrl(f *File) string {
-	if f.DownloadUrl == "" {
+func (d *DriveDB) FreshDownloadUrl(fileId string) string {
+	var urldata DownloadURL
+	key := downloadUrlKey(fileId)
+	err := d.get(key, &urldata)
+
+	if err == nil {
+		if time.Since(time.Unix(urldata.When, 0)) < downloadUrlLifetime {
+			return urldata.URL
+		}
+	} else {
+		d.db.Delete(key, nil)
+	}
+
+	fresh, err := d.service.Files.Get(fileId).Do()
+	if err != nil {
 		return ""
 	}
-	if time.Since(f.cachedDownloadUrlTime) < downloadUrlLifetime {
-		return f.cachedDownloadUrl
-	}
-	log.Printf("Refreshing DownloadUrl for %v", f.Title)
-	fresh, err := d.service.Files.Get(f.Id).Do()
+
+	urldata.URL = fresh.DownloadUrl
+	urldata.When = time.Now().Unix()
+
+	bytes, err := encode(urldata)
 	if err != nil {
-		log.Printf("Failed to refresh DownloadUrl: %v", err)
-		return f.DownloadUrl
+		return urldata.URL
 	}
-	f.cachedDownloadUrl = fresh.DownloadUrl
-	f.cachedDownloadUrlTime = time.Now()
-	log.Printf("Cached DownloadUrl for %v for %v", f.Title, downloadUrlLifetime)
-	return fresh.DownloadUrl
+	err = d.db.Put(key, bytes, nil)
+	if err != nil {
+		return urldata.URL
+	}
+	return urldata.URL
 }
 
 // RemoveAllFiles removes all file entries and child references from leveldb.
@@ -584,10 +604,7 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	d.clearDataCache(fileId)
 	// clear the inode cache.
 	inode, err := d.InodeForFileId(fileId)
-	if err == nil {
-		// remove from the cache
-		d.lruCache.Remove(inode)
-	}
+	d.lruCache.Remove(inode)
 	// delete the inode to fileid mapping
 	batch.Delete(inodeToFileIdKey(inode))
 	// nota bene: fileid to inode mapping is preserved, in case we see this
@@ -635,6 +652,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 
 	// Find its inode, allocate if necessary
 	inode, err := d.InodeForFileId(fileId)
+	d.lruCache.Remove(inode)
 	if err != nil {
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
 	}
@@ -674,22 +692,9 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		}
 	}
 
-	// Wipe the lru cache. We'll re-read elsewhere if needed.
-	for _, fileId := range clearFromCache {
-		inode, err := d.InodeForFileId(fileId)
-		if err != nil {
-			debug.Printf("error flushing fileId %v from cache: %v", fileId, err)
-		}
-		d.lruCache.Remove(inode)
-	}
-
-	file := File{f, inode, nil, "", time.Time{}}
+	file := File{f, inode, nil}
 	d.clearDataCache(fileId)
 	return &file, nil
-}
-
-func (d *DriveDB) FlushCachedInode(inode uint64) {
-	d.lruCache.Remove(inode)
 }
 
 // pollForChanges is a background goroutine to poll Drive for changes.
@@ -774,12 +779,9 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 	batch := new(leveldb.Batch)
 	for _, i := range c.Items {
 		batch.Reset()
-		// Wipe the lru cache for this file. We'll re-read elsewhere if needed.
-		inode, err := d.InodeForFileId(i.FileId)
-		if err != nil && inode > 0 {
-			d.lruCache.Remove(inode)
-		}
 		// Update leveldb.
+		inode, _ := d.InodeForFileId(i.FileId)
+		d.lruCache.Remove(inode)
 		// TODO: don't delete trashed/hidden files? ".trash" folder?
 		if i.Deleted || i.File.Labels.Trashed || i.File.Labels.Hidden {
 			d.RemoveFileById(i.FileId, batch)
@@ -788,7 +790,7 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 		}
 		// Update the checkpoint, which now encompasses one additional change.
 		d.setLastChangeId(i.Id)
-		err = d.writeCheckpoint(batch)
+		err := d.writeCheckpoint(batch)
 		if err != nil {
 			return err
 		}
@@ -1089,10 +1091,7 @@ func (d *DriveDB) prefetcher() {
 // readahead the next drive chunk if needed, async
 func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
 	// prefetch multiple blocks at a time if a file is more than "so big"
-	chunks := 1
-	if filesize > *prefetchThreshold {
-		chunks = int(*prefetchMultiplier)
-	}
+	chunks := int(*prefetchMultiplier)
 
 	for cnk := 1; cnk <= chunks; cnk++ {
 		newchunk := d.chunkToDriveChunk(chunk) + int64(cnk)
@@ -1138,11 +1137,7 @@ func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byt
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
 func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
-	f, err := d.FileByFileId(fileId)
-	if err != nil {
-		return nil, err
-	}
-	url := d.FreshDownloadUrl(f)
+	url := d.FreshDownloadUrl(fileId)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
