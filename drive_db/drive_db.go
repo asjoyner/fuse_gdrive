@@ -208,6 +208,8 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 	if debug {
 		registerDebugHandles(*d) // in http_handlers.go
 	}
+	// two!
+	go d.prefetcher()
 	go d.prefetcher()
 	return d, nil
 }
@@ -1137,6 +1139,7 @@ func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byt
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
 func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
+	log.Printf("%v chunk %v", fileId, chunk)
 	url := d.FreshDownloadUrl(fileId)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
