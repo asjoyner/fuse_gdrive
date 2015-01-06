@@ -321,6 +321,7 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 		req.RespondError(fuse.EIO)
 		return
 	}
+	sc.db.FlushCachedInode(pInode)
 	resp := &fuse.MkdirResponse{}
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency

@@ -525,6 +525,7 @@ func (d *DriveDB) FileByFileId(fileId string) (*File, error) {
 		}
 		file.Children[i] = inode
 	}
+	d.lruCache.Add(file.Inode, &file)
 	return &file, nil
 }
 
@@ -697,6 +698,10 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	file := File{f, inode, nil}
 	d.clearDataCache(fileId)
 	return &file, nil
+}
+
+func (d *DriveDB) FlushCachedInode(inode uint64) {
+	d.lruCache.Remove(inode)
 }
 
 // pollForChanges is a background goroutine to poll Drive for changes.
