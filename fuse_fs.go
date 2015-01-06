@@ -218,11 +218,6 @@ func (sc *serveConn) read(req *fuse.ReadRequest) {
 		req.RespondError(fuse.EIO)
 		return
 	}
-	url := sc.db.FreshDownloadUrl(f.Id)
-	if url == "" { // If there is no url, the file has no body
-		req.RespondError(io.EOF)
-		return
-	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, req.Offset, req.Size)
 	resp.Data, err = sc.db.ReadFiledata(f.Id, req.Offset, int64(req.Size), f.FileSize)
 	if err != nil && err != io.EOF {
