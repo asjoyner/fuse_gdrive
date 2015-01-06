@@ -37,7 +37,7 @@ var (
 	logChanges         = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 	driveCacheChunk    = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
 	driveCacheChunks   = flag.Int64("drivedb.fetchsize", 16, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size; see also --drivedb.prefetchmultiplier).")
-	cacheSize          = flag.Int64("drivedb.maxcachesize", 128, "Chunks to cache from drive at a time.")
+	cacheSize          = flag.Int64("drivedb.maxcachesize", 16, "Chunks to cache from drive at a time.")
 	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 4, "readahead multiplier; --drivedb.fetchsize chunks are fetched in sequence")
 )
 
@@ -1007,7 +1007,9 @@ func (d *DriveDB) readCacheBlock(fileId string, chunk int64) ([]byte, error) {
 	}
 	// Check for the fileId
 	if bytes.Compare(data[:len(cacheKey)], cacheKey) != 0 {
-		debug.Printf(" readCacheBlock wrong   %s c:%d b:%s", fileId, chunk, name)
+		log.Printf(" readCacheBlock wrong   %s c:%d b:%s", fileId, chunk, name)
+		log.Printf("d:[%s]", data[:len(cacheKey)])
+		log.Printf("k:[%s]", cacheKey)
 		_ = d.db.Delete(cacheKey, nil)
 		return nil, fmt.Errorf("mismatched fileId in cache chunk: %s, %v", fileId, chunk)
 	}
@@ -1071,7 +1073,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 		end = size
 	}
 	buf := data[start:end]
-	return buf, d.writeChunks(fileId, dchunk, data)
+	return buf, nil
 }
 
 func (d *DriveDB) prefetcher() {
@@ -1186,5 +1188,6 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	if err != nil {
 		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
 	}
-	return chunkBytes, nil
+
+	return chunkBytes, d.writeChunks(fileId, chunk, chunkBytes)
 }
