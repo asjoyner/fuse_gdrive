@@ -687,6 +687,9 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		b.Delete(childKey(pId + ":" + fileId))
 	}
 
+	// Clear the cached download url
+	b.Delete(downloadUrlKey(fileId), nil)
+
 	// Write now if no batch was supplied.
 	if batch == nil {
 		err := d.db.Write(b, nil)
@@ -696,7 +699,6 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	}
 
 	file := File{f, inode, nil}
-	d.clearDataCache(fileId)
 	return &file, nil
 }
 
