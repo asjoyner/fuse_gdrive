@@ -93,6 +93,24 @@ func (d *DriveDB) fileInodeHandler(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "%# v", pretty.Formatter(file))
 }
 
+// flushInodeHandler flushes the File object at the provided inode from the cache
+func (d *DriveDB) flushInodeHandler(w http.ResponseWriter, req *http.Request) {
+	// This handles strings of the format /drivedb/flushinode/<int>
+	// tip: there's a leading slash... watch those indexes...
+	splitUrl := strings.SplitN(req.URL.Path, "/", 4)
+	if len(splitUrl) < 4 {
+		fmt.Fprintf(w, "wanted url which splits on / with a len(/drivedb/fileid/<fileid>) >= 4, found %v with len(%v): ", splitUrl, len(splitUrl))
+		return
+	}
+	inode, err := strconv.Atoi(splitUrl[3])
+	if err != nil {
+		fmt.Fprintf(w, "int must be an inode: %v", err)
+		return
+	}
+	d.FlushCachedInode(uint64(inode))
+	fmt.Fprintf(w, "Flushed.")
+}
+
 func registerDebugHandles(d DriveDB) {
 	http.HandleFunc("/drivedb/fileids", d.fileIdsHandler)
 	http.HandleFunc("/drivedb/checkpoint", d.checkpointHandler)
