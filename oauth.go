@@ -18,30 +18,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"code.google.com/p/goauth2/oauth"
 )
 
-var defaultClientId string = "902751591868-ghc6jn2vquj6s8n5v5np2i66h3dh5pqq.apps.googleusercontent.com"
-var defaultSecret string = "LLsUuv2NoLglNKx14t5dA9SC"
+const (
+	defaultClientId string = "902751591868-ghc6jn2vquj6s8n5v5np2i66h3dh5pqq.apps.googleusercontent.com"
+	defaultSecret   string = "LLsUuv2NoLglNKx14t5dA9SC"
+)
 
-var clientId = flag.String("clientid", "", "OAuth Client ID")
-var secret = flag.String("secret", "", "OAuth Client Secret")
-var cacheToken = flag.Bool("cachetoken", true, "cache the OAuth token")
-var httpDebug = flag.Bool("http.debug", false, "show HTTP traffic")
-
-func osUserCacheDir() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(os.Getenv("HOME"), "Library", "Caches")
-	case "linux", "freebsd":
-		return filepath.Join(os.Getenv("HOME"), ".cache")
-	}
-	log.Printf("TODO: osUserCacheDir on GOOS %q", runtime.GOOS)
-	return "."
-}
+var (
+	clientId   = flag.String("clientid", "", "OAuth Client ID")
+	secret     = flag.String("secret", "", "OAuth Client Secret")
+	cacheToken = flag.Bool("cachetoken", true, "cache the OAuth token")
+	httpDebug  = flag.Bool("http.debug", false, "show HTTP traffic")
+)
 
 func tokenCacheFile(config *oauth.Config) string {
 	hash := fnv.New32a()
@@ -49,7 +41,7 @@ func tokenCacheFile(config *oauth.Config) string {
 	hash.Write([]byte(config.ClientSecret))
 	hash.Write([]byte(config.Scope))
 	fn := fmt.Sprintf("fuse-gdrive-token-%v", hash.Sum32())
-	return filepath.Join(osUserCacheDir(), url.QueryEscape(fn))
+	return filepath.Join(osDataDir(), url.QueryEscape(fn))
 }
 
 func tokenFromFile(file string) (*oauth.Token, error) {
@@ -66,10 +58,10 @@ func tokenFromFile(file string) (*oauth.Token, error) {
 }
 
 func saveToken(file string, token *oauth.Token) {
-	cacheDir := osUserCacheDir()
-	_, err := os.Stat(cacheDir)
+	dataDir := osDataDir()
+	_, err := os.Stat(dataDir)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(cacheDir, 0777); err != nil {
+		if err := os.MkdirAll(dataDir, 0700); err != nil {
 			log.Printf("Warning: failed to cache oauth token: cache dir does not exist, could not create it: %v", err)
 			return
 		}

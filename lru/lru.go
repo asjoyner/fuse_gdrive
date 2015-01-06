@@ -17,10 +17,15 @@ limitations under the License.
 // Package lru implements an LRU cache.
 package lru
 
-import "container/list"
+import (
+	"container/list"
+	"sync"
+)
 
 // Cache is an LRU cache. It is not safe for concurrent access.
 type Cache struct {
+	sync.Mutex
+	
 	// MaxEntries is the maximum number of cache entries before
 	// an item is evicted. Zero means no limit.
 	MaxEntries int
@@ -54,6 +59,8 @@ func New(maxEntries int) *Cache {
 
 // Add adds a value to the cache.
 func (c *Cache) Add(key Key, value interface{}) {
+	c.Lock()
+	defer c.Unlock()
 	if c.cache == nil {
 		c.cache = make(map[interface{}]*list.Element)
 		c.ll = list.New()
@@ -72,6 +79,8 @@ func (c *Cache) Add(key Key, value interface{}) {
 
 // Get looks up a key's value from the cache.
 func (c *Cache) Get(key Key) (value interface{}, ok bool) {
+	c.Lock()
+	defer c.Unlock()
 	if c.cache == nil {
 		return
 	}
@@ -84,6 +93,8 @@ func (c *Cache) Get(key Key) (value interface{}, ok bool) {
 
 // Remove removes the provided key from the cache.
 func (c *Cache) Remove(key Key) {
+	c.Lock()
+	defer c.Unlock()
 	if c.cache == nil {
 		return
 	}
@@ -94,6 +105,8 @@ func (c *Cache) Remove(key Key) {
 
 // RemoveOldest removes the oldest item from the cache.
 func (c *Cache) RemoveOldest() {
+	c.Lock()
+	defer c.Unlock()
 	if c.cache == nil {
 		return
 	}
@@ -114,6 +127,8 @@ func (c *Cache) removeElement(e *list.Element) {
 
 // Len returns the number of items in the cache.
 func (c *Cache) Len() int {
+	c.Lock()
+	defer c.Unlock()
 	if c.cache == nil {
 		return 0
 	}
