@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	downloadUrlLifetime = time.Duration(time.Hour * 12)
+	downloadUrlLifetime = time.Duration(time.Second * 12)
 	// https://developers.google.com/drive/web/folder
 	driveFolderMimeType string = "application/vnd.google-apps.folder"
 	checkpointVersion          = 2
@@ -1122,7 +1122,11 @@ func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byt
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
 func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
-	url := d.downloadUrl(fileId, false)
+	url, err := d.downloadUrl(fileId, false)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -1148,7 +1152,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	defer resp.Body.Close()
 	if resp.StatusCode != 206 && resp.StatusCode != 200 {
 		err := fmt.Errorf("getChunkFromDriveImpl: for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
-		_ = d.downloadUrl(fileId, true)
+		_, _ = d.downloadUrl(fileId, true)
 		return nil, err
 	}
 	chunkBytes, err := ioutil.ReadAll(resp.Body)
@@ -1159,29 +1163,34 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	return chunkBytes, d.writeChunks(fileId, chunk, chunkBytes)
 }
 
+// singleflight downloadUrl fetches.
+func (d *DriveDB) downloadUrl(fileId string, force bool) (string, error) {
+	v, err := d.sf.Do(fmt.Sprintf("dlurl:%s", fileId), func() (interface{}, error) {
+		return d.downloadUrlImpl(fileId, force)
+	})
+	return v.(string), err
+}
 
 // The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
 // hint: "403 Forbidden" is returned when it has expired
-func (d *DriveDB) downloadUrl(fileId string, force bool) string {
+func (d *DriveDB) downloadUrlImpl(fileId string, force bool) (string, error) {
 	var urldata DownloadURL
-	
-	key := downloadUrlKey(fileId)
-	if force {
-		d.db.Delete(key, nil)
-	}
 
-	err := d.get(key, &urldata)
-	if err == nil {
-		if time.Since(time.Unix(urldata.When, 0)) < downloadUrlLifetime {
-			return urldata.URL
+	key := downloadUrlKey(fileId)
+	if !force {
+		err := d.get(key, &urldata)
+		if err == nil {
+			if time.Since(time.Unix(urldata.When, 0)) < downloadUrlLifetime {
+				return urldata.URL, nil
+			}
+		} else {
+			d.db.Delete(key, nil)
 		}
-	} else {
-		d.db.Delete(key, nil)
 	}
 
 	fresh, err := d.service.Files.Get(fileId).Do()
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	urldata.URL = fresh.DownloadUrl
@@ -1189,11 +1198,11 @@ func (d *DriveDB) downloadUrl(fileId string, force bool) string {
 
 	bytes, err := encode(urldata)
 	if err != nil {
-		return urldata.URL
+		return urldata.URL, nil // didn't cache it, but the caller can still use it
 	}
 	err = d.db.Put(key, bytes, nil)
 	if err != nil {
-		return urldata.URL
+		return urldata.URL, nil
 	}
-	return urldata.URL
+	return urldata.URL, nil
 }
