@@ -7,11 +7,13 @@ import (
 	"strings"
 
 	"github.com/kr/pretty"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 var driveDBLinks string = `<a href=fileids>FileIDs</a><br>
 <a href=checkpoint>Check Point</a><br>
 <a href=inodes>Inodes</a><br>
+<a href=downloadurls>Download Urls</a><br>
 <a href=tree>Tree</a><br>
 `
 
@@ -111,12 +113,28 @@ func (d *DriveDB) flushInodeHandler(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "Flushed.")
 }
 
+// downloadUrlsHandler shows the cache of downloadUrls with their expiry time
+func (d *DriveDB) downloadUrlsHandler(w http.ResponseWriter, req *http.Request) {
+	// We can't Close() until all iterators are released.
+	// TODO: this can still be racy with Close(), fix that.
+	var url DownloadURL
+	d.iters.Add(1)
+	iter := d.db.NewIterator(util.BytesPrefix(downloadUrlKey("")), nil)
+	for iter.Next() {
+		decode(iter.Value(), &url)
+		fmt.Fprintf(w, "%v: %+v\n", deKey(string(iter.Key())), url)
+	}
+	iter.Release()
+	d.iters.Done()
+}
+
 func registerDebugHandles(d DriveDB) {
 	http.HandleFunc("/drivedb/fileids", d.fileIdsHandler)
 	http.HandleFunc("/drivedb/checkpoint", d.checkpointHandler)
 	http.HandleFunc("/drivedb/inodes", d.inodesHandler)
 	http.HandleFunc("/drivedb/fileid/", d.fileIdHandler)
 	http.HandleFunc("/drivedb/fileinode/", d.fileInodeHandler)
+	http.HandleFunc("/drivedb/downloadurls/", d.downloadUrlsHandler)
 	http.HandleFunc("/drivedb/flushinode/", d.flushInodeHandler)
 	// TODO: Implement /tree printing of FS
 	http.HandleFunc("/drivedb/", func(w http.ResponseWriter, r *http.Request) {
