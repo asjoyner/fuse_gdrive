@@ -542,40 +542,6 @@ func (d *DriveDB) Refresh(fileId string) (*File, error) {
 	return d.UpdateFile(nil, f)
 }
 
-// The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
-// hint: "403 Forbidden" is returned when it has expired
-func (d *DriveDB) FreshDownloadUrl(fileId string) string {
-	var urldata DownloadURL
-	key := downloadUrlKey(fileId)
-	err := d.get(key, &urldata)
-
-	if err == nil {
-		if time.Since(time.Unix(urldata.When, 0)) < downloadUrlLifetime {
-			return urldata.URL
-		}
-	} else {
-		d.db.Delete(key, nil)
-	}
-
-	fresh, err := d.service.Files.Get(fileId).Do()
-	if err != nil {
-		return ""
-	}
-
-	urldata.URL = fresh.DownloadUrl
-	urldata.When = time.Now().Unix()
-
-	bytes, err := encode(urldata)
-	if err != nil {
-		return urldata.URL
-	}
-	err = d.db.Put(key, bytes, nil)
-	if err != nil {
-		return urldata.URL
-	}
-	return urldata.URL
-}
-
 // RemoveAllFiles removes all file entries and child references from leveldb.
 // This also flushes the cache, but preserves the fileid->inode mapping
 func (d *DriveDB) RemoveAllFiles() error {
@@ -877,7 +843,7 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 		data, err := d.readChunk(fileId, chunk, filesize)
 		if err != nil {
 			log.Printf(" chunk %v read error: %v", chunk, err)
-			continue
+			return nil, err
 		}
 		ret = append(ret, data...)
 	}
@@ -1156,7 +1122,11 @@ func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byt
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
 func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
-	url := d.FreshDownloadUrl(fileId)
+	url, err := d.downloadUrl(fileId, false)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -1181,7 +1151,8 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 206 && resp.StatusCode != 200 {
-		err := fmt.Errorf("for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
+		err := fmt.Errorf("getChunkFromDriveImpl: for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
+		_, _ = d.downloadUrl(fileId, true)
 		return nil, err
 	}
 	chunkBytes, err := ioutil.ReadAll(resp.Body)
@@ -1190,4 +1161,48 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 
 	return chunkBytes, d.writeChunks(fileId, chunk, chunkBytes)
+}
+
+// singleflight downloadUrl fetches.
+func (d *DriveDB) downloadUrl(fileId string, force bool) (string, error) {
+	v, err := d.sf.Do(fmt.Sprintf("dlurl:%s", fileId), func() (interface{}, error) {
+		return d.downloadUrlImpl(fileId, force)
+	})
+	return v.(string), err
+}
+
+// The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
+// hint: "403 Forbidden" is returned when it has expired
+func (d *DriveDB) downloadUrlImpl(fileId string, force bool) (string, error) {
+	var urldata DownloadURL
+
+	key := downloadUrlKey(fileId)
+	if !force {
+		err := d.get(key, &urldata)
+		if err == nil {
+			if time.Since(time.Unix(urldata.When, 0)) < downloadUrlLifetime {
+				return urldata.URL, nil
+			}
+		} else {
+			d.db.Delete(key, nil)
+		}
+	}
+
+	fresh, err := d.service.Files.Get(fileId).Do()
+	if err != nil {
+		return "", err
+	}
+
+	urldata.URL = fresh.DownloadUrl
+	urldata.When = time.Now().Unix()
+
+	bytes, err := encode(urldata)
+	if err != nil {
+		return urldata.URL, nil // didn't cache it, but the caller can still use it
+	}
+	err = d.db.Put(key, bytes, nil)
+	if err != nil {
+		return urldata.URL, nil
+	}
+	return urldata.URL, nil
 }
