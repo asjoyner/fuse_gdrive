@@ -877,7 +877,7 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 		data, err := d.readChunk(fileId, chunk, filesize)
 		if err != nil {
 			log.Printf(" chunk %v read error: %v", chunk, err)
-			continue
+			return nil, err
 		}
 		ret = append(ret, data...)
 	}
