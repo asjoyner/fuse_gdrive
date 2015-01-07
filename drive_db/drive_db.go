@@ -1148,7 +1148,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	defer resp.Body.Close()
 	if resp.StatusCode != 206 && resp.StatusCode != 200 {
 		err := fmt.Errorf("getChunkFromDriveImpl: for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
-		_ = d.downloadUrl(fileId, false)
+		_ = d.downloadUrl(fileId, true)
 		return nil, err
 	}
 	chunkBytes, err := ioutil.ReadAll(resp.Body)
