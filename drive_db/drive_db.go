@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	downloadUrlLifetime = time.Duration(time.Second * 12)
+	downloadUrlLifetime = time.Duration(time.Hour * 12)
 	// https://developers.google.com/drive/web/folder
 	driveFolderMimeType string = "application/vnd.google-apps.folder"
 	checkpointVersion          = 2
