@@ -849,12 +849,15 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 	}
 
 	// We may have too much data here -- before offset and after end. Return an appropriate slice.
+	dsize := int64(len(ret))
 	low := offset - chunk0*(*driveCacheChunk)
 	if low < 0 {
 		low = 0
 	}
+	if low > dsize {
+		return nil, fmt.Errorf("tried to read past end of chunk (low:%d, dsize:%d): fileId: %s, offset:%d, size:%d, filesize:%d", low, dsize, fileId, offset, size, filesize)
+	}
 	high := low + size
-	dsize := int64(len(ret))
 	if high > dsize {
 		high = dsize
 	}
@@ -973,9 +976,6 @@ func (d *DriveDB) readCacheBlock(fileId string, chunk int64) ([]byte, error) {
 	}
 	// Check for the fileId
 	if bytes.Compare(data[:len(cacheKey)], cacheKey) != 0 {
-		log.Printf(" readCacheBlock wrong   %s c:%d b:%s", fileId, chunk, name)
-		log.Printf("d:[%s]", data[:len(cacheKey)])
-		log.Printf("k:[%s]", cacheKey)
 		_ = d.db.Delete(cacheKey, nil)
 		return nil, fmt.Errorf("mismatched fileId in cache chunk: %s, %v", fileId, chunk)
 	}
