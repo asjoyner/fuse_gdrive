@@ -976,9 +976,6 @@ func (d *DriveDB) readCacheBlock(fileId string, chunk int64) ([]byte, error) {
 	}
 	// Check for the fileId
 	if bytes.Compare(data[:len(cacheKey)], cacheKey) != 0 {
-		log.Printf(" readCacheBlock wrong   %s c:%d b:%s", fileId, chunk, name)
-		log.Printf("d:[%s]", data[:len(cacheKey)])
-		log.Printf("k:[%s]", cacheKey)
 		_ = d.db.Delete(cacheKey, nil)
 		return nil, fmt.Errorf("mismatched fileId in cache chunk: %s, %v", fileId, chunk)
 	}
