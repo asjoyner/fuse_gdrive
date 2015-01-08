@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	downloadUrlLifetime = time.Duration(time.Hour * 12)
+	downloadUrlLifetime = time.Duration(time.Second * 12)
 	// https://developers.google.com/drive/web/folder
 	driveFolderMimeType string = "application/vnd.google-apps.folder"
 	checkpointVersion          = 2
@@ -849,12 +849,15 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 	}
 
 	// We may have too much data here -- before offset and after end. Return an appropriate slice.
+	dsize := int64(len(ret))
 	low := offset - chunk0*(*driveCacheChunk)
 	if low < 0 {
 		low = 0
 	}
+	if low > dsize {
+		return nil, fmt.Errorf("tried to read past end of chunk (low:%d, dsize:%d): fileId: %s, offset:%d, size:%d, filesize:%d", low, dsize, fileId, offset, size, filesize)
+	}
 	high := low + size
-	dsize := int64(len(ret))
 	if high > dsize {
 		high = dsize
 	}
