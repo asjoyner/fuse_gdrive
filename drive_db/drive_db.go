@@ -571,17 +571,26 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	if batch == nil {
 		batch = new(leveldb.Batch)
 	}
+	
+	staleFiles := []string{fileId}
+	
+	// Grab a copy of the file object as it existed previously, if it did
+	of, err := d.FileById(fileId)
+	if err == nil {
+		for _, pr := range of.Parents {
+			batch.Delete(childKey(pr.Id + ":" + fileId))
+			staleFiles = append(staleFiles, pr.Id)
+		}
+	}	
+	
 	// delete the file itself.
 	batch.Delete(fileKey(fileId))
-	// and its cached data.
-	d.clearDataCache(fileId)
-	// clear the inode cache.
-	inode, err := d.InodeForFileId(fileId)
-	d.lruCache.Remove(inode)
+	batch.Delete(downloadUrlKey(fileId))
+
 	// delete the inode to fileid mapping
-	batch.Delete(inodeToFileIdKey(inode))
 	// nota bene: fileid to inode mapping is preserved, in case we see this
 	// fileid again in the future; preserves mapping during re-init
+	// batch.Delete(inodeToFileIdKey(inode))
 
 	// also delete all of its child refs
 	d.iters.Add(1)
@@ -591,17 +600,19 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	}
 	iter.Release()
 	d.iters.Done()
-	// and delete any parents' refs to it.
-	f, err := d.FileById(fileId)
-	if err == nil && f != nil {
-		for _, pr := range f.Parents {
-			batch.Delete(childKey(pr.Id + ":" + fileId))
-		}
-	}
+
+	// commit
 	err = d.db.Write(batch, nil)
 	if err != nil {
 		return err
 	}
+	
+	// Clear the cached download url, inode cache and data cache
+	for _, id := range staleFiles {
+		d.FlushCachedInodeForFileId(id)
+	}	
+	d.clearDataCache(fileId)
+	
 	return nil
 }
 
@@ -616,22 +627,21 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
 	}
 
-	clearFromCache := []string{f.Id}
-
 	b := batch
 	if b == nil {
 		b = new(leveldb.Batch)
 	}
 
+	staleFiles := []string{fileId}
+	var oldParents map[string]bool
+
 	// Find its inode, allocate if necessary
 	inode, err := d.InodeForFileId(fileId)
-	d.lruCache.Remove(inode)
 	if err != nil {
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
 	}
 
 	// Grab a copy of the file object as it existed previously, if it did
-	var oldParents map[string]bool
 	of, err := d.FileById(fileId)
 	if err == nil {
 		oldParents = make(map[string]bool, len(of.Parents))
@@ -647,18 +657,15 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	for _, pr := range f.Parents {
 		debug.Printf("Adding parent: %v", pr.Id)
 		b.Put(childKey(pr.Id+":"+fileId), nil) // we care only about the key
-		clearFromCache = append(clearFromCache, pr.Id)
 		delete(oldParents, pr.Id)
+		staleFiles = append(staleFiles, pr.Id)
 	}
 
 	for pId := range oldParents { // these parents were no longer present
 		debug.Printf("Removing parent: %v", pId)
-		clearFromCache = append(clearFromCache, pId)
 		b.Delete(childKey(pId + ":" + fileId))
+		staleFiles = append(staleFiles, pId)
 	}
-
-	// Clear the cached download url
-	b.Delete(downloadUrlKey(fileId))
 
 	// Write now if no batch was supplied.
 	if batch == nil {
@@ -668,11 +675,22 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		}
 	}
 
+	// Clear the cached download url and inode cache
+	b.Delete(downloadUrlKey(fileId))
+	for _, id := range staleFiles {
+		d.FlushCachedInodeForFileId(id)
+	}
+
 	file := File{f, inode, nil}
 	return &file, nil
 }
 
 func (d *DriveDB) FlushCachedInode(inode uint64) {
+	d.lruCache.Remove(inode)
+}
+
+func (d *DriveDB) FlushCachedInodeForFileId(fileId string) {
+	inode, err := d.InodeForFileId(fileId)
 	d.lruCache.Remove(inode)
 }
 
@@ -757,6 +775,11 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 
 	batch := new(leveldb.Batch)
 	for _, i := range c.Items {
+		if i.File == nil {
+			log.Printf(" %s: deleted", i.FileId)
+		} else {
+			log.Printf(" %s: %q size:%v version:%v labels:%#v", i.FileId, i.File.Title, i.File.FileSize, i.File.Version, i.File.Labels)
+		}
 		batch.Reset()
 		// Update leveldb.
 		inode, _ := d.InodeForFileId(i.FileId)
