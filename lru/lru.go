@@ -25,7 +25,6 @@ import (
 // Cache is an LRU cache. It is not safe for concurrent access.
 type Cache struct {
 	sync.Mutex
-	
 	// MaxEntries is the maximum number of cache entries before
 	// an item is evicted. Zero means no limit.
 	MaxEntries int
@@ -105,8 +104,6 @@ func (c *Cache) Remove(key Key) {
 
 // RemoveOldest removes the oldest item from the cache.
 func (c *Cache) RemoveOldest() {
-	c.Lock()
-	defer c.Unlock()
 	if c.cache == nil {
 		return
 	}
