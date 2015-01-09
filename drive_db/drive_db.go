@@ -690,7 +690,7 @@ func (d *DriveDB) FlushCachedInode(inode uint64) {
 }
 
 func (d *DriveDB) FlushCachedInodeForFileId(fileId string) {
-	inode, err := d.InodeForFileId(fileId)
+	inode, _ := d.InodeForFileId(fileId)
 	d.lruCache.Remove(inode)
 }
 
