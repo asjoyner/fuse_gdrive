@@ -568,15 +568,17 @@ func (d *DriveDB) RemoveFile(f *gdrive.File) error {
 }
 
 func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
+	log.Printf("RemoveFileById: %s", fileId)
 	if batch == nil {
 		batch = new(leveldb.Batch)
 	}
 	
 	staleFiles := []string{fileId}
 	
-	// Grab a copy of the file object as it existed previously, if it did
+	// Grab a copy of the file object as it existed previously, if it did,
+	// remove this file from its parents, and remember to removethe stale inode.
 	of, err := d.FileById(fileId)
-	if err == nil {
+	if err == nil && of != nil && of.Parents != nil {
 		for _, pr := range of.Parents {
 			batch.Delete(childKey(pr.Id + ":" + fileId))
 			staleFiles = append(staleFiles, pr.Id)
@@ -622,6 +624,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("cannot update nil File")
 	}
 	fileId := f.Id
+	log.Printf("UpdateFile: %s", fileId)
 	bytes, err := encode(f)
 	if err != nil {
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
@@ -632,8 +635,6 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		b = new(leveldb.Batch)
 	}
 
-	staleFiles := []string{fileId}
-	var oldParents map[string]bool
 
 	// Find its inode, allocate if necessary
 	inode, err := d.InodeForFileId(fileId)
@@ -641,10 +642,12 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("error allocating inode for fileid %v: %v", fileId, err)
 	}
 
+	staleFiles := []string{fileId}
+	oldParents := make(map[string]bool)
+
 	// Grab a copy of the file object as it existed previously, if it did
 	of, err := d.FileById(fileId)
-	if err == nil {
-		oldParents = make(map[string]bool, len(of.Parents))
+	if err == nil && of !=nil && of.Parents != nil {
 		for _, pr := range of.Parents {
 			oldParents[pr.Id] = true
 		}
@@ -667,6 +670,9 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		staleFiles = append(staleFiles, pId)
 	}
 
+	// Clear the downloadURL
+	b.Delete(downloadUrlKey(fileId))
+
 	// Write now if no batch was supplied.
 	if batch == nil {
 		err := d.db.Write(b, nil)
@@ -676,7 +682,6 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	}
 
 	// Clear the cached download url and inode cache
-	b.Delete(downloadUrlKey(fileId))
 	for _, id := range staleFiles {
 		d.FlushCachedInodeForFileId(id)
 	}
