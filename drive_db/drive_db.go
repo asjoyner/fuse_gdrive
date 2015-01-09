@@ -568,7 +568,6 @@ func (d *DriveDB) RemoveFile(f *gdrive.File) error {
 }
 
 func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
-	log.Printf("RemoveFileById: %s", fileId)
 	if batch == nil {
 		batch = new(leveldb.Batch)
 	}
@@ -624,7 +623,6 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		return &File{}, fmt.Errorf("cannot update nil File")
 	}
 	fileId := f.Id
-	log.Printf("UpdateFile: %s", fileId)
 	bytes, err := encode(f)
 	if err != nil {
 		return &File{}, fmt.Errorf("error encoding file %v: %v", fileId, err)
@@ -781,9 +779,9 @@ func (d *DriveDB) processChange(c *gdrive.ChangeList) error {
 	batch := new(leveldb.Batch)
 	for _, i := range c.Items {
 		if i.File == nil {
-			log.Printf(" %s: deleted", i.FileId)
+			debug.Printf(" %s: deleted", i.FileId)
 		} else {
-			log.Printf(" %s: %q size:%v version:%v labels:%#v", i.FileId, i.File.Title, i.File.FileSize, i.File.Version, i.File.Labels)
+			debug.Printf(" %s: %q size:%v version:%v labels:%#v", i.FileId, i.File.Title, i.File.FileSize, i.File.Version, i.File.Labels)
 		}
 		batch.Reset()
 		// Update leveldb.
@@ -1171,7 +1169,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 	spec := fmt.Sprintf("bytes=%d-%d", start, end)
 	req.Header.Add("Range", spec)
-	log.Printf("reading %v %s", fileId, spec)
+	debug.Printf("reading %v %s", fileId, spec)
 
 	resp, err := d.client.Do(req)
 	if err != nil {
