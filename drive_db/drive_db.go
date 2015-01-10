@@ -39,6 +39,7 @@ var (
 	driveCacheChunks   = flag.Int64("drivedb.fetchsize", 16, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size; see also --drivedb.prefetchmultiplier).")
 	cacheSize          = flag.Int64("drivedb.maxcachesize", 16, "Chunks to cache from drive at a time.")
 	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 4, "readahead multiplier; --drivedb.fetchsize chunks are fetched in sequence")
+	prefetchWorkers    = flag.Int("drivedb.prefetchworkers", 2, "number of prefetches to make in parallel")
 )
 
 type debugging bool
@@ -212,9 +213,10 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 	if debug {
 		registerDebugHandles(*d) // in http_handlers.go
 	}
-	// two!
-	go d.prefetcher()
-	go d.prefetcher()
+
+	for i := 0; i < *prefetchWorkers; i++ {
+		go d.prefetcher()
+	}
 	return d, nil
 }
 
@@ -1051,6 +1053,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 
 	// map to larger drive read size
 	dchunk := d.chunkToDriveChunk(chunk)
+	debug.Printf("reading chunk %d from drive", dchunk)
 	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
 	if err != nil {
 		log.Printf("error reading from drive: %v", err)
@@ -1085,8 +1088,9 @@ func (d *DriveDB) prefetcher() {
 				continue
 			}
 			// if it isn't, get it.
+			// we don't care about the data; getChunkFromDrive writes it to cache.
 			debug.Printf("prefetching %s drive block %d", s.fileId, newchunk)
-			data, err := d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
+			_, err = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
 			if err != nil {
 				log.Printf("prefetch error: %v", err)
 				d.Lock()
@@ -1094,7 +1098,6 @@ func (d *DriveDB) prefetcher() {
 				d.Unlock()
 				continue
 			}
-			d.writeChunks(s.fileId, newchunk, data)
 			d.Lock()
 			delete(d.pfetchmap, key)
 			d.Unlock()
