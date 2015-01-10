@@ -1053,7 +1053,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 
 	// map to larger drive read size
 	dchunk := d.chunkToDriveChunk(chunk)
-	log.Printf("reading chunk %d from drive", dchunk)
+	debug.Printf("reading chunk %d from drive", dchunk)
 	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
 	if err != nil {
 		log.Printf("error reading from drive: %v", err)
@@ -1088,8 +1088,8 @@ func (d *DriveDB) prefetcher() {
 				continue
 			}
 			// if it isn't, get it.
-			log.Printf("prefetching %s drive block %d", s.fileId, newchunk)
 			// we don't care about the data; getChunkFromDrive writes it to cache.
+			debug.Printf("prefetching %s drive block %d", s.fileId, newchunk)
 			_, err = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
 			if err != nil {
 				log.Printf("prefetch error: %v", err)
@@ -1172,7 +1172,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 	spec := fmt.Sprintf("bytes=%d-%d", start, end)
 	req.Header.Add("Range", spec)
-	// log.Printf("reading %v %s", fileId, spec)
+	debug.Printf("reading %v %s", fileId, spec)
 
 	resp, err := d.client.Do(req)
 	if err != nil {
