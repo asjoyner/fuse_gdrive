@@ -9,5 +9,5 @@ fi
 
 for i in `seq 1 20`; do
   ls -lRa $ROOT >/dev/null &
+  ls -lRa $ROOT >/dev/null
 done
-ls -lRa $ROOT >/dev/null
