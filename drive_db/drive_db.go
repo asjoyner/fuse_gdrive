@@ -295,7 +295,7 @@ func cacheMapKeyPrefix(fileId string) []byte {
 }
 
 func cacheMapKey(fileId string, chunk int64) []byte {
-	return []byte(fmt.Sprintf("cky:%s\\0%d", fileId, chunk))
+	return []byte(fmt.Sprintf("cky:%s\\0%d\\0%d", fileId, *driveCacheChunk, chunk))
 }
 
 func deKey(key string) string {
@@ -1079,24 +1079,11 @@ func (d *DriveDB) prefetcher() {
 			newchunk := s.chunk
 			key := fmt.Sprintf("%s:%d", s.fileId, newchunk)
 			c := d.driveChunkToChunk(newchunk)
-			// if it's already cached, return early
 			_, err := d.readCacheBlock(s.fileId, c)
-			if err == nil {
-				d.Lock()
-				delete(d.pfetchmap, key)
-				d.Unlock()
-				continue
-			}
-			// if it isn't, get it.
-			// we don't care about the data; getChunkFromDrive writes it to cache.
-			debug.Printf("prefetching %s drive block %d", s.fileId, newchunk)
-			_, err = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
 			if err != nil {
-				log.Printf("prefetch error: %v", err)
-				d.Lock()
-				delete(d.pfetchmap, key)
-				d.Unlock()
-				continue
+				debug.Printf("prefetching %s drive block %d", s.fileId, newchunk)
+				// we don't care about the data; getChunkFromDrive writes it to cache.
+				_, _ = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
 			}
 			d.Lock()
 			delete(d.pfetchmap, key)
