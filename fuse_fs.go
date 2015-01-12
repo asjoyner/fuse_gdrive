@@ -159,6 +159,11 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 		return
 	}
 
+	/* TODO: getattr during upload must return current file size
+	sc.Lock()
+	sc.Unlock()
+	*/
+
 	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(resp)
 	req.Respond(resp)
@@ -603,7 +608,7 @@ func (sc *serveConn) rename(req *fuse.RenameRequest) {
 	return
 }
 
-// TODO: Implement write
+// Pass sequential writes on to the correct handle for uploading
 func (sc *serveConn) write(req *fuse.WriteRequest) {
 	if *readOnly {
 		req.RespondError(fuse.EPERM)
@@ -626,6 +631,9 @@ func (sc *serveConn) write(req *fuse.WriteRequest) {
 		req.RespondError(fuse.EIO)
 		return
 	}
+	sc.Lock()
 	h.lastByte += int64(n)
+	sc.handles[req.Handle] = h
+	sc.Unlock()
 	req.Respond(&fuse.WriteResponse{n})
 }
