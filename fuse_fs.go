@@ -6,8 +6,10 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	_ "net/http/pprof"
 	"os"
+	"sync"
 	"time"
 
 	"bazil.org/fuse"
@@ -31,6 +33,15 @@ type serveConn struct {
 	uid        uint32 // uid of the user who mounted the FS
 	gid        uint32 // gid of the user who mounted the FS
 	conn       *fuse.Conn
+	handles    []handle              // index is the handleid, inode=0 if free
+	writers    map[int]io.PipeWriter // index matches fh
+	sync.Mutex
+}
+
+type handle struct {
+	inode    fuse.NodeID
+	writer   *io.PipeWriter
+	lastByte int64
 }
 
 // FuseServe receives and dispatches Requests from the kernel
@@ -81,6 +92,17 @@ func (sc *serveConn) serve(req fuse.Request) {
 	case *fuse.OpenRequest:
 		sc.open(req)
 
+	// Silently ignore attempts to change permissions
+	case *fuse.SetattrRequest:
+		inode := uint64(req.Header.Node)
+		f, err := sc.db.FileByInode(inode)
+		if err != nil {
+			fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
+			req.RespondError(fuse.EIO)
+			return
+		}
+		req.Respond(&fuse.SetattrResponse{Attr: sc.attrFromFile(*f)})
+
 	case *fuse.CreateRequest:
 		// TODO: if allow_other, require uid == invoking uid to allow writes
 		sc.create(req)
@@ -118,7 +140,7 @@ func (sc *serveConn) serve(req fuse.Request) {
 
 	// Ack release of the kernel's mapping an inode->fileId
 	case *fuse.ReleaseRequest:
-		req.Respond()
+		sc.release(req)
 
 	case *fuse.DestroyRequest:
 		req.Respond()
@@ -178,7 +200,6 @@ func (sc *serveConn) readDir(req *fuse.ReadRequest) {
 	inode := uint64(req.Header.Node)
 	resp := &fuse.ReadResponse{make([]byte, 0, req.Size)}
 	var dirs []fuse.Dirent
-	var err error
 	file, err := sc.db.FileByInode(inode)
 	if err != nil {
 		fuse.Debug(fmt.Sprintf("FileByInode(%d): %v", inode, err))
@@ -257,32 +278,169 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 	return attr
 }
 
-// Hand back the inode as the HandleID
+// Allocate a file handle, held by the kernel until Release
 func (sc *serveConn) open(req *fuse.OpenRequest) {
 	// This will be cheap, Lookup always preceeds Open, so the cache is warm
-	/* TODO: uncomment this after FileByInode handles inode 1
-	if _, err := sc.db.FileByInode(uint64(req.Header.Node)); err != nil {
+	f, err := sc.db.FileByInode(uint64(req.Header.Node))
+	if err != nil {
 		req.RespondError(fuse.ENOENT)
 		return
 	}
-	*/
-	if *readOnly && !req.Flags.IsReadOnly() {
-		req.RespondError(fuse.EPERM)
-		return
+
+	var hId uint64
+	if !req.Flags.IsReadOnly() { // write access requested
+		if *readOnly {
+			// TODO: if allow_other, require uid == invoking uid to allow writes
+			req.RespondError(fuse.EPERM)
+			return
+		}
+
+		r, w := io.Pipe() // plumbing between WriteRequest and Drive
+		go sc.updateInDrive(f.File, r)
+		hId = sc.allocHandle(req.Header.Node, w)
+	} else {
+		hId = sc.allocHandle(req.Header.Node, nil)
 	}
-	// TODO: if allow_other, require uid == invoking uid to allow writes
-	// TODO: when implementing writes, allocate a kernel handle here, id
-	// allocation scheme TBD...
-	req.Respond(&fuse.OpenResponse{Handle: fuse.HandleID(req.Header.Node)})
+
+	resp := fuse.OpenResponse{Handle: fuse.HandleID(hId)}
+	fuse.Debug(fmt.Sprintf("Open Response: %+v", resp))
+	req.Respond(&resp)
 }
 
-// TODO: Implement create
+// allocate a kernel file handle for the requested inode
+func (sc *serveConn) allocHandle(inode fuse.NodeID, w *io.PipeWriter) uint64 {
+	var hId uint64
+	var found bool
+	h := handle{inode: inode, writer: w}
+	sc.Lock()
+	defer sc.Unlock()
+	for i, ch := range sc.handles {
+		if ch.inode == 0 {
+			hId = uint64(i)
+			sc.handles[hId] = h
+			found = true
+			break
+		}
+	}
+	if !found {
+		hId = uint64(len(sc.handles))
+		sc.handles = append(sc.handles, h)
+	}
+	return hId
+}
+
+// Lookup an inode by its NodeID
+func (sc *serveConn) handleById(id fuse.HandleID) (handle, error) {
+	sc.Lock()
+	defer sc.Unlock()
+	if int(id) >= len(sc.handles) {
+		return handle{}, fmt.Errorf("handle %v has not been allocated", id)
+	}
+	return sc.handles[id], nil
+}
+
+// Prepare to upload the content of the file.
+// Any insert or update w/ Media() blocks until the Reader closes.
+func (sc *serveConn) updateInDrive(f *drive.File, r *io.PipeReader) {
+	_, err := sc.service.Files.Update(f.Id, f).Media(r).Do()
+	if err != nil {
+		log.Printf("failed uploading %v to drive: %v", f.Title, err)
+	}
+	debug.Printf("finished uploading to drive: %v", f.Title)
+}
+
+// Acknowledge release of file handle by kernel
+func (sc *serveConn) release(req *fuse.ReleaseRequest) {
+	sc.Lock()
+	defer sc.Unlock()
+	h := sc.handles[req.Handle]
+	if h.writer != nil {
+		h.writer.Close()
+		/*
+			fileId, err := sc.db.FileIdForInode(uint64(h.inode))
+			if err != nil {
+				log.Printf("failed to lookup inode for close: %v\n", err)
+				req.RespondError(fuse.EIO)
+				return
+			}
+
+			l := &drive.FileLabels{Hidden: false}
+			f := drive.File{Id: fileId, Labels: l}
+			if _, err = sc.service.Files.Update(fileId, &f).Do(); err != nil {
+				log.Printf("failed to mark inode %v not hidden: %v\n", h.inode, err)
+				req.RespondError(fuse.EIO)
+				return
+			}
+		*/
+	}
+	h.inode = 0
+	req.Respond()
+}
+
+// Create file in drive, allocate kernel filehandle for writes
 func (sc *serveConn) create(req *fuse.CreateRequest) {
 	if *readOnly && !req.Flags.IsReadOnly() {
 		req.RespondError(fuse.EPERM)
 		return
 	}
-	req.RespondError(fuse.EIO)
+
+	pInode := uint64(req.Header.Node)
+	parent, err := sc.db.FileByInode(pInode)
+	if err != nil {
+		debug.Printf("failed to get parent file: %v", err)
+		req.RespondError(fuse.EIO)
+		return
+	}
+	p := &drive.ParentReference{Id: parent.Id}
+
+	f := &drive.File{Title: req.Name}
+	f.Parents = []*drive.ParentReference{p}
+	f, err = sc.service.Files.Insert(f).Do()
+	if err != nil {
+		debug.Printf("Files.Insert(f).Do(): %v", err)
+		req.RespondError(fuse.EIO)
+		return
+	}
+	inode, err := sc.db.InodeForFileId(f.Id)
+	if err != nil {
+		debug.Printf("failed creating inode for %v: %v", req.Name, err)
+		req.RespondError(fuse.EIO)
+		return
+	}
+
+	r, w := io.Pipe() // plumbing between WriteRequest and Drive
+	h := sc.allocHandle(fuse.NodeID(inode), w)
+
+	go sc.updateInDrive(f, r)
+
+	// Tell fuse and the OS about the file
+	df, err := sc.db.UpdateFile(nil, f)
+	if err != nil {
+		debug.Printf("failed to update levelDB for %v: %v", f.Id, err)
+		// The write has happened to drive, but we failed to update the kernel.
+		// The Changes API will update Fuse, and when the kernel metadata for
+		// the parent directory expires, the new file will become visible.
+		req.RespondError(fuse.EIO)
+		return
+	}
+
+	resp := fuse.CreateResponse{
+		// describes the opened handle
+		OpenResponse: fuse.OpenResponse{
+			Handle: fuse.HandleID(h),
+			Flags:  fuse.OpenNonSeekable,
+		},
+		// describes the created file
+		LookupResponse: fuse.LookupResponse{
+			Node:       fuse.NodeID(inode),
+			EntryValid: *driveMetadataLatency,
+			AttrValid:  *driveMetadataLatency,
+			Attr:       sc.attrFromFile(*df),
+		},
+	}
+	fuse.Debug(fmt.Sprintf("Create(%v in %v): %+v", req.Name, parent.Title, resp))
+
+	req.Respond(&resp)
 }
 
 func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
@@ -310,7 +468,7 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 	f, err := sc.db.UpdateFile(nil, file)
 	if err != nil {
 		debug.Printf("failed to update levelDB for %v: %v", f.Id, err)
-		// The write has happened to drive, but we can't update the kernel yet.
+		// The write has happened to drive, but we failed to update the kernel.
 		// The Changes API will update Fuse, and when the kernel metadata for
 		// the parent directory expires, the new dir will become visible.
 		req.RespondError(fuse.EIO)
@@ -452,5 +610,22 @@ func (sc *serveConn) write(req *fuse.WriteRequest) {
 		return
 	}
 	// TODO: if allow_other, require uid == invoking uid to allow writes
-	req.RespondError(fuse.EIO)
+	h, err := sc.handleById(req.Handle)
+	if err != nil {
+		fuse.Debug(fmt.Sprintf("inodeByNodeID(%v): %v", req.Handle, err))
+		req.RespondError(fuse.ESTALE)
+		return
+	}
+	if h.lastByte != req.Offset {
+		fuse.Debug(fmt.Sprintf("non-sequential write: got %v, expected %v", req.Offset, h.lastByte))
+		req.RespondError(fuse.EIO)
+		return
+	}
+	n, err := h.writer.Write(req.Data)
+	if err != nil {
+		req.RespondError(fuse.EIO)
+		return
+	}
+	h.lastByte += int64(n)
+	req.Respond(&fuse.WriteResponse{n})
 }

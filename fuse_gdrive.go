@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -200,10 +201,10 @@ func main() {
 	sc := serveConn{db: db,
 		driveCache: driveCache,
 		service:    service,
-		//handles:    make(map[fuse.HandleID]string),
-		uid:  uid,
-		gid:  gid,
-		conn: c,
+		uid:        uid,
+		gid:        gid,
+		writers:    make(map[int]io.PipeWriter),
+		conn:       c,
 	}
 	err = sc.Serve()
 	if err != nil {
