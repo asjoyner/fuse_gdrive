@@ -275,6 +275,10 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 	if err := crtime.UnmarshalText([]byte(file.CreatedDate)); err != nil {
 		crtime = startup
 	}
+	blocks := file.FileSize / int64(blockSize)
+	if r := file.FileSize % int64(blockSize); r > 0 {
+		blocks += 1
+	}
 	attr := fuse.Attr{
 		Inode:  file.Inode,
 		Atime:  atime,
@@ -285,7 +289,7 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 		Gid:    sc.gid,
 		Mode:   0755,
 		Size:   uint64(file.FileSize),
-		Blocks: uint64(file.FileSize / int64(blockSize)),
+		Blocks: uint64(blocks),
 	}
 	if file.MimeType == driveFolderMimeType {
 		attr.Mode = os.ModeDir | 0755
