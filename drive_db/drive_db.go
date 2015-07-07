@@ -40,6 +40,7 @@ var (
 	cacheSize          = flag.Int64("drivedb.maxcachesize", 16, "Chunks to cache from drive at a time.")
 	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 4, "readahead multiplier; --drivedb.fetchsize chunks are fetched in sequence")
 	prefetchWorkers    = flag.Int("drivedb.prefetchworkers", 2, "number of prefetches to make in parallel")
+	inodeCacheSize     = flag.Int("drivedb.inodecachesize", 10000, "number of cached inode entries (nb: larger than num files in the largest directory)")
 )
 
 type debugging bool
@@ -170,7 +171,7 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		db:           db,
 		dbpath:       ldbPath,
 		data:         cachePath,
-		lruCache:     lru.New(int(1000)), // make the value tunable
+		lruCache:     lru.New(*inodeCacheSize),
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
 		rootId:       rootId,

@@ -24,6 +24,7 @@ import (
 
 // https://developers.google.com/drive/web/folder
 const driveFolderMimeType string = "application/vnd.google-apps.folder"
+const blockSize uint32 = 4096
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
@@ -76,7 +77,16 @@ func (sc *serveConn) serve(req fuse.Request) {
 		req.Respond(&resp)
 
 	case *fuse.StatfsRequest:
-		req.Respond(&fuse.StatfsResponse{})
+		var numfiles uint64
+		if f, err := sc.db.AllFileIds(); err != nil {
+			numfiles = uint64(len(f))
+		}
+		req.Respond(
+			&fuse.StatfsResponse{
+				Files: numfiles,
+				Bsize: blockSize,
+			},
+		)
 
 	case *fuse.GetattrRequest:
 		sc.getattr(req)
@@ -265,6 +275,10 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 	if err := crtime.UnmarshalText([]byte(file.CreatedDate)); err != nil {
 		crtime = startup
 	}
+	blocks := file.FileSize / int64(blockSize)
+	if r := file.FileSize % int64(blockSize); r > 0 {
+		blocks += 1
+	}
 	attr := fuse.Attr{
 		Inode:  file.Inode,
 		Atime:  atime,
@@ -275,7 +289,7 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 		Gid:    sc.gid,
 		Mode:   0755,
 		Size:   uint64(file.FileSize),
-		Blocks: uint64(file.FileSize),
+		Blocks: uint64(blocks),
 	}
 	if file.MimeType == driveFolderMimeType {
 		attr.Mode = os.ModeDir | 0755
