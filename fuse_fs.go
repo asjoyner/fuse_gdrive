@@ -160,8 +160,6 @@ func (sc *serveConn) serve(req fuse.Request) {
 // gettattr returns fuse.Attr for the inode described by req.Header.Node
 func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 	inode := uint64(req.Header.Node)
-	resp := &fuse.GetattrResponse{}
-	resp.AttrValid = *driveMetadataLatency
 	f, err := sc.db.FileByInode(inode)
 	if err != nil {
 		fuse.Debug(fmt.Sprintf("FileByInode(%v): %v", inode, err))
@@ -174,6 +172,7 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 	sc.Unlock()
 	*/
 
+	resp := &fuse.GetattrResponse{}
 	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(resp)
 	req.Respond(resp)
@@ -200,7 +199,6 @@ func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 		if cf.Title == req.Name {
 			resp.Node = fuse.NodeID(cInode)
 			resp.EntryValid = *driveMetadataLatency
-			resp.AttrValid = *driveMetadataLatency
 			resp.Attr = sc.attrFromFile(*cf)
 			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
 			req.Respond(resp)
@@ -280,6 +278,7 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 		blocks += 1
 	}
 	attr := fuse.Attr{
+	        Valid:  *driveMetadataLatency,
 		Inode:  file.Inode,
 		Atime:  atime,
 		Mtime:  mtime,
@@ -453,7 +452,6 @@ func (sc *serveConn) create(req *fuse.CreateRequest) {
 		LookupResponse: fuse.LookupResponse{
 			Node:       fuse.NodeID(inode),
 			EntryValid: *driveMetadataLatency,
-			AttrValid:  *driveMetadataLatency,
 			Attr:       sc.attrFromFile(*df),
 		},
 	}
@@ -497,7 +495,6 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 	resp := &fuse.MkdirResponse{}
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency
-	resp.AttrValid = *driveMetadataLatency
 	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(fmt.Sprintf("Mkdir(%v): %+v", req.Name, f))
 	req.Respond(resp)
