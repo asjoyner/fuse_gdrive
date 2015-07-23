@@ -278,7 +278,7 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 		blocks += 1
 	}
 	attr := fuse.Attr{
-	        Valid:  *driveMetadataLatency,
+		Valid:  *driveMetadataLatency,
 		Inode:  file.Inode,
 		Atime:  atime,
 		Mtime:  mtime,
@@ -287,6 +287,7 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 		Uid:    sc.uid,
 		Gid:    sc.gid,
 		Mode:   0755,
+		Nlink:  uint32(file.LinkCount),
 		Size:   uint64(file.FileSize),
 		Blocks: uint64(blocks),
 	}
