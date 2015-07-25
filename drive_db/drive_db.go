@@ -29,7 +29,7 @@ const (
 	downloadUrlLifetime = time.Duration(time.Hour * 12)
 	// https://developers.google.com/drive/web/folder
 	driveFolderMimeType string = "application/vnd.google-apps.folder"
-	checkpointVersion          = 2
+	checkpointVersion          = 3
 )
 
 var (
@@ -69,8 +69,9 @@ func decode(data []byte, item interface{}) error {
 
 type File struct {
 	*gdrive.File
-	Inode    uint64
-	Children []uint64 // inodes of children
+	Inode     uint64
+	Children  []uint64 // inodes of children
+	LinkCount int
 }
 
 type CheckPoint struct {
@@ -189,7 +190,7 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		log.Printf("error reading checkpoint: %v", err)
 		d.cpt = NewCheckpoint()
 	}
-	if d.cpt.Version < checkpointVersion {
+	if d.cpt.Version != checkpointVersion {
 		log.Printf("checkpoint version invalid, require %v but found %v", checkpointVersion, d.cpt.Version)
 		err = d.reinit()
 		if err != nil {
@@ -287,8 +288,14 @@ func downloadUrlKey(key string) []byte {
 	return []byte("url:" + key)
 }
 
-func childKey(key string) []byte {
-	return []byte("kid:" + key)
+func childKey(parentId, childId string) []byte {
+	return []byte(string(childKeyPrefix(parentId)) + ":" + childId)
+}
+
+// childKeyPrefix returns a byte prefix that can be used to lookup all children
+// of the given parent.
+func childKeyPrefix(parentId string) []byte {
+	return []byte("kid:" + parentId)
 }
 
 func cacheMapKeyPrefix(fileId string) []byte {
@@ -301,6 +308,16 @@ func cacheMapKey(fileId string, chunk int64) []byte {
 
 func deKey(key string) string {
 	return key[4:]
+}
+
+// linkCount returns the link count of the passed gdrive.File given its subdirectory count.
+func linkCount(f *gdrive.File, numSubDirs int) int {
+	links := len(f.Parents) + numSubDirs
+	// If this is a directory, the '.' counts as an additional link
+	if f.MimeType == driveFolderMimeType {
+		links++
+	}
+	return links
 }
 
 // get retrives a single key from the database.
@@ -439,20 +456,22 @@ func (d *DriveDB) AllFileIds() ([]string, error) {
 	return ids, iter.Error()
 }
 
-// ChildFileIds returns the IDs of all Files that have parent refs to the given file.
-func (d *DriveDB) ChildFileIds(fileId string) ([]string, error) {
-	var ids []string
+// childFileIds returns a map containing IDs of all Files that have parent
+// refs to the given file.  The returned map keys are IDs, and the map values
+// indicate if the child is a directory.
+func (d *DriveDB) childFileIds(fileId string) (map[string]bool, error) {
+	ids := make(map[string]bool)
 	d.iters.Add(1)
 	batch := new(leveldb.Batch)
-	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileId)), nil)
+	iter := d.db.NewIterator(util.BytesPrefix(childKeyPrefix(fileId)), nil)
 	for iter.Next() {
 		pidcid := deKey(string(iter.Key()))
 		cid := pidcid[len(fileId)+1:]
-		found, err := d.db.Has(fileKey(cid), nil)
-		if err == nil && found {
-			ids = append(ids, cid)
-		} else {
+		if gdriveFile, err := d.FileById(cid); err != nil {
+			log.Printf("unknown fileId %v: %v", fileId, err)
 			batch.Delete(iter.Key())
+		} else {
+			ids[cid] = gdriveFile.MimeType == driveFolderMimeType
 		}
 	}
 	iter.Release()
@@ -513,25 +532,29 @@ func (d *DriveDB) FileByFileId(fileId string) (*File, error) {
 		return nil, fmt.Errorf("unknown fileId %v: %v", fileId, err)
 	}
 
-	file := File{gdriveFile, 0, nil}
+	file := File{File: gdriveFile}
 	file.Inode, err = d.InodeForFileId(fileId)
 	if err != nil {
 		return nil, fmt.Errorf("no inode for %v: %v", fileId, err)
 	}
 
-	childFileIds, err := d.ChildFileIds(fileId)
+	childFileIds, err := d.childFileIds(fileId)
 	if err != nil {
 		return nil, fmt.Errorf("error getting children of fileId %v: %v", fileId, err)
 	}
-	file.Children = make([]uint64, len(childFileIds))
-	for i, fileId := range childFileIds {
+	var numSubDirs int
+	for fileId, isDir := range childFileIds {
 		inode, err := d.InodeForFileId(fileId)
 		if err != nil {
 			d.lruCache.Remove(inode)
 			return nil, fmt.Errorf("error getting inode of child %v: %v", fileId, err)
 		}
-		file.Children[i] = inode
+		file.Children = append(file.Children, inode)
+		if isDir {
+			numSubDirs++
+		}
 	}
+	file.LinkCount = linkCount(gdriveFile, numSubDirs)
 	d.lruCache.Add(file.Inode, &file)
 	return &file, nil
 }
@@ -574,19 +597,20 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	if batch == nil {
 		batch = new(leveldb.Batch)
 	}
-	
+
 	staleFiles := []string{fileId}
-	
+
 	// Grab a copy of the file object as it existed previously, if it did,
-	// remove this file from its parents, and remember to removethe stale inode.
+	// remove this file from its parents, and remember to remove the stale
+	// inode.
 	of, err := d.FileById(fileId)
 	if err == nil && of != nil && of.Parents != nil {
 		for _, pr := range of.Parents {
-			batch.Delete(childKey(pr.Id + ":" + fileId))
+			batch.Delete(childKey(pr.Id, fileId))
 			staleFiles = append(staleFiles, pr.Id)
 		}
-	}	
-	
+	}
+
 	// delete the file itself.
 	batch.Delete(fileKey(fileId))
 	batch.Delete(downloadUrlKey(fileId))
@@ -598,7 +622,7 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 
 	// also delete all of its child refs
 	d.iters.Add(1)
-	iter := d.db.NewIterator(util.BytesPrefix(childKey(fileId)), nil)
+	iter := d.db.NewIterator(util.BytesPrefix(childKeyPrefix(fileId)), nil)
 	for iter.Next() {
 		batch.Delete(iter.Key())
 	}
@@ -606,17 +630,16 @@ func (d *DriveDB) RemoveFileById(fileId string, batch *leveldb.Batch) error {
 	d.iters.Done()
 
 	// commit
-	err = d.db.Write(batch, nil)
-	if err != nil {
+	if err := d.db.Write(batch, nil); err != nil {
 		return err
 	}
-	
+
 	// Clear the cached download url, inode cache and data cache
 	for _, id := range staleFiles {
 		d.FlushCachedInodeForFileId(id)
-	}	
+	}
 	d.clearDataCache(fileId)
-	
+
 	return nil
 }
 
@@ -636,7 +659,6 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		b = new(leveldb.Batch)
 	}
 
-
 	// Find its inode, allocate if necessary
 	inode, err := d.InodeForFileId(fileId)
 	if err != nil {
@@ -648,7 +670,7 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 
 	// Grab a copy of the file object as it existed previously, if it did
 	of, err := d.FileById(fileId)
-	if err == nil && of !=nil && of.Parents != nil {
+	if err == nil && of != nil && of.Parents != nil {
 		for _, pr := range of.Parents {
 			oldParents[pr.Id] = true
 		}
@@ -660,14 +682,14 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 	// Maintain child references
 	for _, pr := range f.Parents {
 		debug.Printf("Adding parent: %v", pr.Id)
-		b.Put(childKey(pr.Id+":"+fileId), nil) // we care only about the key
+		b.Put(childKey(pr.Id, fileId), nil) // we care only about the key
 		delete(oldParents, pr.Id)
 		staleFiles = append(staleFiles, pr.Id)
 	}
 
 	for pId := range oldParents { // these parents were no longer present
 		debug.Printf("Removing parent: %v", pId)
-		b.Delete(childKey(pId + ":" + fileId))
+		b.Delete(childKey(pId, fileId))
 		staleFiles = append(staleFiles, pId)
 	}
 
@@ -687,7 +709,10 @@ func (d *DriveDB) UpdateFile(batch *leveldb.Batch, f *gdrive.File) (*File, error
 		d.FlushCachedInodeForFileId(id)
 	}
 
-	file := File{f, inode, nil}
+	file := File{
+		File:  f,
+		Inode: inode,
+	}
 	return &file, nil
 }
 
