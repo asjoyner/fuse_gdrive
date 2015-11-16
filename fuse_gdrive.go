@@ -22,9 +22,9 @@ import (
 	drive "code.google.com/p/google-api-go-client/drive/v2"
 
 	"bazil.org/fuse"
-
 	"github.com/asjoyner/fuse_gdrive/cache"
 	"github.com/asjoyner/fuse_gdrive/drive_db"
+	"golang.org/x/net/context"
 )
 
 var (
@@ -97,6 +97,7 @@ func sanityCheck(mountpoint string) error {
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	runtime.SetBlockProfileRate(1)
+	ctx := context.Background()
 
 	flag.Usage = Usage
 	flag.Parse()
@@ -135,9 +136,9 @@ func main() {
 
 	var client *http.Client
 	if *readOnly {
-		client = getOAuthClient(drive.DriveReadonlyScope)
+		client = getClient(ctx, drive.DriveReadonlyScope)
 	} else {
-		client = getOAuthClient(drive.DriveScope)
+		client = getClient(ctx, drive.DriveScope)
 	}
 
 	driveCache := cache.NewCache("/tmp", client)
@@ -156,7 +157,7 @@ func main() {
 	// Ensure the token's always fresh
 	// TODO: Remove this once goauth2 changes are accepted upstream
 	// https://code.google.com/p/goauth2/issues/detail?id=47
-	go tokenKicker(client, 59*time.Minute)
+	// go tokenKicker(client, 59*time.Minute)
 
 	// Create and start the drive metadata syncer.
 	db, err := drive_db.NewDriveDB(client, *dbDir, *cacheDir, *driveMetadataLatency, rootId)
