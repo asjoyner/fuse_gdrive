@@ -174,6 +174,7 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 
 	resp := &fuse.GetattrResponse{}
 	resp.Attr = sc.attrFromFile(*f)
+	resp.Attr.Valid = *driveMetadataLatency
 	fuse.Debug(resp)
 	req.Respond(resp)
 }
@@ -199,6 +200,7 @@ func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 		if cf.Title == req.Name {
 			resp.Node = fuse.NodeID(cInode)
 			resp.EntryValid = *driveMetadataLatency
+			resp.Attr.Valid = *driveMetadataLatency
 			resp.Attr = sc.attrFromFile(*cf)
 			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
 			req.Respond(resp)
@@ -456,6 +458,7 @@ func (sc *serveConn) create(req *fuse.CreateRequest) {
 			Attr:       sc.attrFromFile(*df),
 		},
 	}
+	resp.Attr.Valid = *driveMetadataLatency
 	fuse.Debug(fmt.Sprintf("Create(%v in %v): %+v", req.Name, parent.Title, resp))
 
 	req.Respond(&resp)
@@ -496,6 +499,7 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 	resp := &fuse.MkdirResponse{}
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency
+	resp.Attr.Valid = *driveMetadataLatency
 	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(fmt.Sprintf("Mkdir(%v): %+v", req.Name, f))
 	req.Respond(resp)
