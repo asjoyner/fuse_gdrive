@@ -177,9 +177,11 @@ func main() {
 	if *allowOther {
 		options = append(options, fuse.AllowOther())
 	}
+	/*
 	if *readOnly {
 		options = append(options, fuse.ReadOnly())
 	}
+	*/
 	c, err := fuse.Mount(mountpoint, options...)
 	if err != nil {
 		log.Fatal(err)

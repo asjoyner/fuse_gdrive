@@ -33,14 +33,13 @@ const (
 )
 
 var (
-	debugDriveDB       = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
-	logChanges         = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
-	driveCacheChunk    = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
-	driveCacheChunks   = flag.Int64("drivedb.fetchsize", 16, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size; see also --drivedb.prefetchmultiplier).")
-	cacheSize          = flag.Int64("drivedb.maxcachesize", 16, "Chunks to cache from drive at a time.")
-	prefetchMultiplier = flag.Int64("drivedb.prefetchmultiplier", 4, "readahead multiplier; --drivedb.fetchsize chunks are fetched in sequence")
-	prefetchWorkers    = flag.Int("drivedb.prefetchworkers", 2, "number of prefetches to make in parallel")
-	inodeCacheSize     = flag.Int("drivedb.inodecachesize", 10000, "number of cached inode entries (nb: larger than num files in the largest directory)")
+	debugDriveDB     = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
+	logChanges       = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
+	driveCacheChunk  = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
+	driveCacheChunks = flag.Int64("drivedb.fetchsize", 8, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size; see also --drivedb.prefetchmultiplier).")
+	cacheSize        = flag.Int64("drivedb.maxcachesize", 32768, "Chunks to cache from drive at a time.")
+	prefetchWorkers  = flag.Int("drivedb.prefetchworkers", 4, "number of prefetches to make in parallel")
+	inodeCacheSize   = flag.Int("drivedb.inodecachesize", 50000, "number of cached inode entries (nb: larger than num files in the largest directory)")
 )
 
 type debugging bool
@@ -112,6 +111,8 @@ type DriveDB struct {
 	cacheBlocks  int64
 	pfetchq      chan DownloadSpec
 	pfetchmap    map[string]bool
+	openmap      map[string]int
+	openmu       sync.Mutex
 }
 
 func openLevelDB(filepath string) (*leveldb.DB, error) {
@@ -176,10 +177,11 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		changes:      make(chan *gdrive.ChangeList, 200),
 		pollInterval: pollInterval,
 		rootId:       rootId,
-		driveSize:    (*driveCacheChunk) * (*driveCacheChunks),                     // ensure drive reads are always a multiple of cache size
-		cacheBlocks:  (*cacheSize) * ((*driveCacheChunks) * (*prefetchMultiplier)), // enough blocks for readahead
+		driveSize:    (*driveCacheChunk) * (*driveCacheChunks), // ensure drive reads are always a multiple of cache size
+		cacheBlocks:  (*cacheSize) * (*driveCacheChunks),       // enough blocks for readahead
 		pfetchq:      make(chan DownloadSpec, 20000),
 		pfetchmap:    make(map[string]bool),
+		openmap:      make(map[string]int),
 	}
 
 	log.Printf("%d cache blocks of %d bytes", d.cacheBlocks, *driveCacheChunk)
@@ -197,6 +199,7 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 			log.Printf("Failed to reinitialize the database: %v", err)
 			log.Fatal("You should probably run: rm -rf %v", ldbPath)
 		}
+		log.Printf("reinitialized databse")
 	}
 	err = d.writeCheckpoint(nil)
 	if err != nil {
@@ -888,6 +891,29 @@ func (d *DriveDB) driveChunkToChunk(dchunk int64) int64 {
 	return dchunk * d.driveSize / (*driveCacheChunk)
 }
 
+func (d *DriveDB) OpenFile(fileId string) {
+	d.openmu.Lock()
+	d.openmap[fileId]++
+	d.openmu.Unlock()
+}
+
+func (d *DriveDB) CloseFile(fileId string) {
+	d.openmu.Lock()
+	d.openmap[fileId]--
+	if d.openmap[fileId] < 0 {
+		log.Printf("negative refcount on %s", fileId)
+		d.openmap[fileId] = 0
+	}
+	d.openmu.Unlock()
+}
+
+func (d *DriveDB) IsOpen(fileId string) bool {
+	d.openmu.Lock()
+	val := d.openmap[fileId]
+	d.openmu.Unlock()
+	return val > 0
+}
+
 // ReadFiledata reads a chunk of a file, possibly from cache.
 func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]byte, error) {
 	var ret []byte
@@ -1114,44 +1140,50 @@ func (d *DriveDB) prefetcher() {
 			d.Lock()
 			delete(d.pfetchmap, key)
 			d.Unlock()
+			if d.IsOpen(s.fileId) {
+				next := newchunk + 1
+				d.prefetchDriveChunk(s.fileId, next, s.filesize)
+			}
 		}
 	}
 }
 
 // readahead the next drive chunk if needed, async
 func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
-	for cnk := 1; cnk <= int(*prefetchMultiplier); cnk++ {
-		newchunk := d.chunkToDriveChunk(chunk) + int64(cnk)
-		// past eof? don't do anything silly.
-		if newchunk*d.driveSize > filesize {
-			return
-		}
-		// already in the prefetch map? do nothing.
-		key := fmt.Sprintf("%s:%d", fileId, newchunk)
-		d.Lock()
-		queued := d.pfetchmap[key]
-		d.Unlock()
-		if queued {
-			return
-		}
-
-		// already on disk? do nothing.
-		c := d.driveChunkToChunk(newchunk)
-		_, err := d.readCacheBlock(fileId, c)
-		if err == nil {
-			return
-		}
-
-		// add it to the map and queue the fetch
-		d.Lock()
-		d.pfetchmap[key] = true
-		d.Unlock()
-		d.pfetchq <- DownloadSpec{
-			fileId:   fileId,
-			chunk:    newchunk,
-			filesize: filesize,
-		}
+	newchunk := d.chunkToDriveChunk(chunk) + 1
+	// past eof? don't do anything silly.
+	if newchunk*d.driveSize > filesize {
+		return
 	}
+	// already in the prefetch map? do nothing.
+	key := fmt.Sprintf("%s:%d", fileId, newchunk)
+	d.Lock()
+	queued := d.pfetchmap[key]
+	d.Unlock()
+	if queued {
+		return
+	}
+
+	// already on disk? do nothing.
+	c := d.driveChunkToChunk(newchunk)
+	_, err := d.readCacheBlock(fileId, c)
+	if err == nil {
+		return
+	}
+
+	// add it to the map and queue the fetch, if the file is actually open.
+	if !d.IsOpen(fileId) {
+		return
+	}
+	d.Lock()
+	d.pfetchmap[key] = true
+	d.Unlock()
+	d.pfetchq <- DownloadSpec{
+		fileId:   fileId,
+		chunk:    newchunk,
+		filesize: filesize,
+	}
+	log.Printf("%s prefetch %d (q:%d)", fileId, newchunk, len(d.pfetchq))
 }
 
 // singleflight drive fetches.

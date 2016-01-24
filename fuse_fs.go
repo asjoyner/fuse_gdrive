@@ -174,7 +174,6 @@ func (sc *serveConn) getattr(req *fuse.GetattrRequest) {
 
 	resp := &fuse.GetattrResponse{}
 	resp.Attr = sc.attrFromFile(*f)
-	resp.Attr.Valid = *driveMetadataLatency
 	fuse.Debug(resp)
 	req.Respond(resp)
 }
@@ -200,7 +199,6 @@ func (sc *serveConn) lookup(req *fuse.LookupRequest) {
 		if cf.Title == req.Name {
 			resp.Node = fuse.NodeID(cInode)
 			resp.EntryValid = *driveMetadataLatency
-			resp.Attr.Valid = *driveMetadataLatency
 			resp.Attr = sc.attrFromFile(*cf)
 			fuse.Debug(fmt.Sprintf("Lookup(%v in %v): %v", req.Name, inode, cInode))
 			req.Respond(resp)
@@ -280,7 +278,6 @@ func (sc *serveConn) attrFromFile(file drive_db.File) fuse.Attr {
 		blocks += 1
 	}
 	attr := fuse.Attr{
-		Valid:  *driveMetadataLatency,
 		Inode:  file.Inode,
 		Atime:  atime,
 		Mtime:  mtime,
@@ -307,6 +304,8 @@ func (sc *serveConn) open(req *fuse.OpenRequest) {
 		req.RespondError(fuse.ENOENT)
 		return
 	}
+
+	sc.db.OpenFile(f.Id)
 
 	var hId uint64
 	if !req.Flags.IsReadOnly() { // write access requested
@@ -372,6 +371,10 @@ func (sc *serveConn) updateInDrive(f *drive.File, r *io.PipeReader) {
 
 // Acknowledge release of file handle by kernel
 func (sc *serveConn) release(req *fuse.ReleaseRequest) {
+	f, err := sc.db.FileByInode(uint64(req.Header.Node))
+	if err == nil {
+		sc.db.CloseFile(f.Id)
+	}
 	sc.Lock()
 	defer sc.Unlock()
 	h := sc.handles[req.Handle]
@@ -458,7 +461,6 @@ func (sc *serveConn) create(req *fuse.CreateRequest) {
 			Attr:       sc.attrFromFile(*df),
 		},
 	}
-	resp.Attr.Valid = *driveMetadataLatency
 	fuse.Debug(fmt.Sprintf("Create(%v in %v): %+v", req.Name, parent.Title, resp))
 
 	req.Respond(&resp)
@@ -499,7 +501,6 @@ func (sc *serveConn) mkdir(req *fuse.MkdirRequest) {
 	resp := &fuse.MkdirResponse{}
 	resp.Node = fuse.NodeID(f.Inode)
 	resp.EntryValid = *driveMetadataLatency
-	resp.Attr.Valid = *driveMetadataLatency
 	resp.Attr = sc.attrFromFile(*f)
 	fuse.Debug(fmt.Sprintf("Mkdir(%v): %+v", req.Name, f))
 	req.Respond(resp)
