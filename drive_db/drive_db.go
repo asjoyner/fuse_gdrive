@@ -36,7 +36,7 @@ var (
 	debugDriveDB     = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
 	logChanges       = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 	driveCacheChunk  = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
-	driveCacheChunks = flag.Int64("drivedb.fetchsize", 8, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size; see also --drivedb.prefetchmultiplier).")
+	driveCacheChunks = flag.Int64("drivedb.fetchsize", 8, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size).")
 	cacheSize        = flag.Int64("drivedb.maxcachesize", 32768, "Chunks to cache from drive at a time.")
 	prefetchWorkers  = flag.Int("drivedb.prefetchworkers", 4, "number of prefetches to make in parallel")
 	inodeCacheSize   = flag.Int("drivedb.inodecachesize", 50000, "number of cached inode entries (nb: larger than num files in the largest directory)")
@@ -1183,7 +1183,7 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
 		chunk:    newchunk,
 		filesize: filesize,
 	}
-	log.Printf("%s prefetch %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+	debug.Printf("%s prefetch %d (q:%d)", fileId, newchunk, len(d.pfetchq))
 }
 
 // singleflight drive fetches.
