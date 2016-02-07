@@ -36,9 +36,8 @@ var (
 	debugDriveDB     = flag.Bool("drivedb.debug", false, "print debug statements from the drive_db package and debug enable HTTP handlers which can leak all your data via HTTP.")
 	logChanges       = flag.Bool("drivedb.logchanges", false, "Log json encoded metadata as it is fetched from Google Drive.")
 	driveCacheChunk  = flag.Int64("drivedb.cachechunk", 256*1024, "Cache data in segments of this many bytes.")
-	driveCacheChunks = flag.Int64("drivedb.fetchsize", 8, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size).")
+	driveCacheChunks = flag.Int64("drivedb.fetchsize", 32, "Chunks of --drivedb.cachechunk bytes to read from drive at a time (aka readahead size).")
 	cacheSize        = flag.Int64("drivedb.maxcachesize", 32768, "Chunks to cache from drive at a time.")
-	prefetchWorkers  = flag.Int("drivedb.prefetchworkers", 4, "number of prefetches to make in parallel")
 	inodeCacheSize   = flag.Int("drivedb.inodecachesize", 50000, "number of cached inode entries (nb: larger than num files in the largest directory)")
 )
 
@@ -179,12 +178,13 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		rootId:       rootId,
 		driveSize:    (*driveCacheChunk) * (*driveCacheChunks), // ensure drive reads are always a multiple of cache size
 		cacheBlocks:  (*cacheSize) * (*driveCacheChunks),       // enough blocks for readahead
-		pfetchq:      make(chan DownloadSpec, 20000),
+		pfetchq:      make(chan DownloadSpec, 200),
 		pfetchmap:    make(map[string]bool),
 		openmap:      make(map[string]int),
 	}
 
-	log.Printf("%d cache blocks of %d bytes", d.cacheBlocks, *driveCacheChunk)
+	log.Printf("%d cache blocks of %d bytes each = %d GB", d.cacheBlocks, *driveCacheChunk, d.cacheBlocks*(*driveCacheChunk)/1024/1024/1024)
+	log.Printf("reading from drive %d bytes at a time", d.driveSize)
 
 	// Get saved checkpoint.
 	err = d.get(internalKey("checkpoint"), &d.cpt)
@@ -219,9 +219,7 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		registerDebugHandles(*d) // in http_handlers.go
 	}
 
-	for i := 0; i < *prefetchWorkers; i++ {
-		go d.prefetcher()
-	}
+	go d.prefetcher()
 	return d, nil
 }
 
@@ -1096,19 +1094,22 @@ func (d *DriveDB) writeChunks(fileId string, drivechunk int64, data []byte) erro
 
 // readChunkImpl actually reads the data from either the db or drive.
 func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, error) {
-	defer d.prefetchDriveChunk(fileId, chunk, filesize)
-
+	// map to larger drive read size, store last read drive chunk
 	data, err := d.readCacheBlock(fileId, chunk)
 	if err == nil {
 		return data, nil
 	}
 
-	// map to larger drive read size
 	dchunk := d.chunkToDriveChunk(chunk)
-	debug.Printf("reading chunk %d from drive", dchunk)
+	log.Printf("sync read   %s drive block %d", fileId, dchunk)
 	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
 	if err != nil {
-		log.Printf("error reading from drive: %v", err)
+		file, ferr := d.FileByFileId(fileId)
+		if ferr != nil {
+			log.Printf("error reading from drive: %v / %v", err, ferr)
+		} else {
+			log.Printf("error reading %s from drive: %v", file.Title, err)
+		}
 		return nil, err
 	}
 
@@ -1127,36 +1128,41 @@ func (d *DriveDB) prefetcher() {
 	for {
 		select {
 		case s := <-d.pfetchq:
-			// See if the next chunk is already cached.
 			newchunk := s.chunk
-			key := fmt.Sprintf("%s:%d", s.fileId, newchunk)
-			c := d.driveChunkToChunk(newchunk)
-			_, err := d.readCacheBlock(s.fileId, c)
-			if err != nil {
-				debug.Printf("prefetching %s drive block %d", s.fileId, newchunk)
-				// we don't care about the data; getChunkFromDrive writes it to cache.
-				_, _ = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
-			}
 			d.Lock()
-			delete(d.pfetchmap, key)
+			delete(d.pfetchmap, fmt.Sprintf("%s:%d", s.fileId, newchunk))
 			d.Unlock()
-			if d.IsOpen(s.fileId) {
-				next := newchunk + 1
-				d.prefetchDriveChunk(s.fileId, next, s.filesize)
+			if !d.IsOpen(s.fileId) {
+				continue
 			}
+			// See if the next chunk is already cached.
+			_, err := d.readCacheBlock(s.fileId, d.driveChunkToChunk(newchunk))
+			if err == nil {
+				continue
+			}
+			// we don't care about the data; getChunkFromDrive writes it to cache.
+			_, _ = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
 		}
 	}
 }
 
 // readahead the next drive chunk if needed, async
-func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
-	newchunk := d.chunkToDriveChunk(chunk) + 1
-	// past eof? don't do anything silly.
+func (d *DriveDB) prefetchDriveChunk(fileId string, newchunk, filesize int64) {
+	debug.Printf("pfrequest   %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+	// Past eof? don't do anything silly.
 	if newchunk*d.driveSize > filesize {
+		debug.Printf("past eof    %s drive block %d", fileId, newchunk)
 		return
 	}
-	// already in the prefetch map? do nothing.
 	key := fmt.Sprintf("%s:%d", fileId, newchunk)
+	// If the file isn't open, drop the prefetch request and delete the map key.
+	if !d.IsOpen(fileId) {
+		d.Lock()
+		delete(d.pfetchmap, key)
+		d.Unlock()
+		return
+	}
+	// Already in the prefetch queue? do nothing.
 	d.Lock()
 	queued := d.pfetchmap[key]
 	d.Unlock()
@@ -1164,26 +1170,17 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, chunk, filesize int64) {
 		return
 	}
 
-	// already on disk? do nothing.
-	c := d.driveChunkToChunk(newchunk)
-	_, err := d.readCacheBlock(fileId, c)
-	if err == nil {
-		return
-	}
-
-	// add it to the map and queue the fetch, if the file is actually open.
-	if !d.IsOpen(fileId) {
-		return
-	}
+	// Add to the queue.
 	d.Lock()
 	d.pfetchmap[key] = true
 	d.Unlock()
+
 	d.pfetchq <- DownloadSpec{
 		fileId:   fileId,
 		chunk:    newchunk,
 		filesize: filesize,
 	}
-	debug.Printf("%s prefetch %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+	debug.Printf("queued      %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
 }
 
 // singleflight drive fetches.
@@ -1196,6 +1193,8 @@ func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byt
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
 func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
+	debug.Printf("retrieving  %s drive block %d", fileId, chunk)
+	defer d.prefetchDriveChunk(fileId, chunk+1, filesize)
 	url, err := d.downloadUrl(fileId, false)
 	if err != nil {
 		return nil, err
@@ -1234,6 +1233,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
 	}
 
+	debug.Printf("retrieved   %s drive block %d of %d", fileId, chunk, filesize/d.driveSize)
 	return chunkBytes, d.writeChunks(fileId, chunk, chunkBytes)
 }
 
