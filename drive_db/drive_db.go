@@ -1102,6 +1102,7 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 	}
 
 	dchunk := d.chunkToDriveChunk(chunk)
+	defer d.prefetchDriveChunk(fileId, dchunk+1, filesize)
 	log.Printf("sync read   %s drive block %d", fileId, dchunk)
 	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
 	if err != nil {
@@ -1181,12 +1182,11 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, newchunk, filesize int64) {
 		chunk:    newchunk,
 		filesize: filesize,
 	}
-	debug.Printf("queued      %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+	log.Printf("queued      %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
 }
 
 // singleflight drive fetches.
 func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byte, error) {
-	defer d.prefetchDriveChunk(fileId, chunk+1, filesize)
 	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, chunk), func() (interface{}, error) {
 		return d.getChunkFromDriveImpl(fileId, chunk, filesize)
 	})
@@ -1237,7 +1237,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
 	}
 
-	debug.Printf("retrieved   %s drive block %d of %d", fileId, chunk, filesize/d.driveSize)
+	log.Printf("retrieved   %s drive block %d of %d", fileId, chunk, filesize/d.driveSize)
 	return chunkBytes, d.writeChunks(fileId, chunk, chunkBytes)
 }
 
