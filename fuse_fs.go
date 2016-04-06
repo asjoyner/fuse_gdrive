@@ -18,7 +18,6 @@ import (
 
 	drive "code.google.com/p/google-api-go-client/drive/v2"
 
-	"github.com/asjoyner/fuse_gdrive/cache"
 	"github.com/asjoyner/fuse_gdrive/drive_db"
 )
 
@@ -28,14 +27,13 @@ const blockSize uint32 = 4096
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
-	db         *drive_db.DriveDB
-	service    *drive.Service
-	driveCache cache.Reader
-	uid        uint32 // uid of the user who mounted the FS
-	gid        uint32 // gid of the user who mounted the FS
-	conn       *fuse.Conn
-	handles    []handle              // index is the handleid, inode=0 if free
-	writers    map[int]io.PipeWriter // index matches fh
+	db      *drive_db.DriveDB
+	service *drive.Service
+	uid     uint32 // uid of the user who mounted the FS
+	gid     uint32 // gid of the user who mounted the FS
+	conn    *fuse.Conn
+	handles []handle              // index is the handleid, inode=0 if free
+	writers map[int]io.PipeWriter // index matches fh
 	sync.Mutex
 }
 
