@@ -22,7 +22,6 @@ import (
 	drive "code.google.com/p/google-api-go-client/drive/v2"
 
 	"bazil.org/fuse"
-	"github.com/asjoyner/fuse_gdrive/cache"
 	"github.com/asjoyner/fuse_gdrive/drive_db"
 	"golang.org/x/net/context"
 )
@@ -141,8 +140,6 @@ func main() {
 		client = getClient(ctx, drive.DriveScope)
 	}
 
-	driveCache := cache.NewCache("/tmp", client)
-
 	// TODO: move into drivedb, so we don't create a service twice
 	service, _ := drive.New(client)
 	about, err := service.About.Get().Do()
@@ -198,12 +195,11 @@ func main() {
 	}()
 
 	sc := serveConn{db: db,
-		driveCache: driveCache,
-		service:    service,
-		uid:        uid,
-		gid:        gid,
-		writers:    make(map[int]io.PipeWriter),
-		conn:       c,
+		service: service,
+		uid:     uid,
+		gid:     gid,
+		writers: make(map[int]io.PipeWriter),
+		conn:    c,
 	}
 	err = sc.Serve()
 	if err != nil {
