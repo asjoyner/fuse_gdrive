@@ -1201,12 +1201,12 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 	url, err := d.downloadUrl(fileId, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("downloadUrl(): %v", err)
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("http.newRequest(): %v", err)
 	}
 	// See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
 	// https://developers.google.com/drive/web/manage-downloads#partial_download
