@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"time"
 
-	drive "code.google.com/p/google-api-go-client/drive/v2"
+	drive "google.golang.org/api/drive/v2"
 
 	"bazil.org/fuse"
 	"github.com/asjoyner/fuse_gdrive/drive_db"

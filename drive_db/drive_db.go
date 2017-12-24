@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	gdrive "code.google.com/p/google-api-go-client/drive/v2"
 	"github.com/asjoyner/fuse_gdrive/lru"
 	"github.com/golang/groupcache/singleflight"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -23,6 +22,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
+	gdrive "google.golang.org/api/drive/v2"
 )
 
 const (
