@@ -4,6 +4,7 @@ package main
 // and Google Drive.
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,7 +17,7 @@ import (
 	_ "bazil.org/fuse/fs/fstestutil"
 	"bazil.org/fuse/fuseutil"
 
-	drive "code.google.com/p/google-api-go-client/drive/v2"
+	drive "google.golang.org/api/drive/v2"
 
 	"github.com/asjoyner/fuse_gdrive/drive_db"
 )
@@ -24,6 +25,10 @@ import (
 // https://developers.google.com/drive/web/folder
 const driveFolderMimeType string = "application/vnd.google-apps.folder"
 const blockSize uint32 = 4096
+
+var (
+	numWorkers = flag.Int("numWorkers", 20, "The number of goroutines to service fuse requests.")
+)
 
 // serveConn holds the state about the fuse connection
 type serveConn struct {
@@ -45,6 +50,20 @@ type handle struct {
 
 // FuseServe receives and dispatches Requests from the kernel
 func (sc *serveConn) Serve() error {
+	// Create a pool of goroutines that service Fuse requests
+	// Each goroutine consumes a small amount of memory, but allows more
+	// parallelisim in handling kernel fuse requests.
+	workRequests := make(chan fuse.Request)
+	for w := 1; w <= *numWorkers; w++ {
+		go func(reqs chan fuse.Request) {
+			for req := range reqs {
+				fuse.Debug(fmt.Sprintf("%+v", req))
+				sc.serve(req)
+			}
+			return
+		}(workRequests)
+	}
+
 	for {
 		req, err := sc.conn.ReadRequest()
 		if err != nil {
@@ -55,7 +74,7 @@ func (sc *serveConn) Serve() error {
 		}
 
 		fuse.Debug(fmt.Sprintf("%+v", req))
-		go sc.serve(req)
+		workRequests <- req
 	}
 	return nil
 }

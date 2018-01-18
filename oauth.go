@@ -26,8 +26,8 @@ const (
 )
 
 var (
-	clientID     = flag.String("clientid", "", "OAuth Client ID")
-	clientSecret = flag.String("secret", "", "OAuth Client Secret")
+	clientID     = flag.String("clientid", defaultClientId, "OAuth Client ID")
+	clientSecret = flag.String("secret", defaultSecret, "OAuth Client Secret")
 	cacheToken   = flag.Bool("cachetoken", true, "cache the OAuth token")
 	httpDebug    = flag.Bool("http.debug", false, "show HTTP traffic")
 )
