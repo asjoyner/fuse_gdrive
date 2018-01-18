@@ -88,7 +88,9 @@ func (sc *serveConn) serve(req fuse.Request) {
 		req.RespondError(fuse.ENOSYS)
 
 	case *fuse.InitRequest:
-		resp := fuse.InitResponse{MaxWrite: 128 * 1024,
+		resp := fuse.InitResponse{
+			MaxWrite: 128 * 1024,
+			MaxReadahead: 1<<32 - 1,
 			Flags: fuse.InitBigWrites & fuse.InitAsyncRead,
 		}
 		req.Respond(&resp)
