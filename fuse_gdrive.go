@@ -23,6 +23,7 @@ import (
 
 	"bazil.org/fuse"
 	"github.com/asjoyner/fuse_gdrive/drive_db"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/context"
 )
 
@@ -131,6 +132,7 @@ func main() {
 	}
 
 	http.HandleFunc("/", RootHandler)
+	http.Handle("/metrics", prometheus.Handler())
 	go http.ListenAndServe(fmt.Sprintf("localhost:%s", *port), nil)
 
 	var client *http.Client
