@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	gdrive "code.google.com/p/google-api-go-client/drive/v2"
 	"github.com/asjoyner/fuse_gdrive/lru"
 	"github.com/golang/groupcache/singleflight"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -23,6 +22,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
+	gdrive "google.golang.org/api/drive/v2"
 )
 
 const (
@@ -1203,12 +1203,12 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 	url, err := d.downloadUrl(fileId, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("downloadUrl(): %v", err)
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("http.newRequest(): %v", err)
 	}
 	// See http://tools.ietf.org/html/rfc2616#section-14.35  (.1 and .2)
 	// https://developers.google.com/drive/web/manage-downloads#partial_download
