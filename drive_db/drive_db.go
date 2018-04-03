@@ -1102,10 +1102,8 @@ func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, e
 	}
 
 	dchunk := d.chunkToDriveChunk(chunk)
-	for i := 4; i > 0; i-- {
-		defer d.prefetchDriveChunk(fileId, dchunk+int64(i), filesize)
-	}
-	log.Printf("sync read   %s drive block %d of %d", fileId, dchunk, filesize/d.driveSize)
+	defer d.prefetchDriveChunk(fileId, dchunk+1, filesize)
+	log.Printf("sync read   %s drive block %d", fileId, dchunk)
 	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
 	if err != nil {
 		file, ferr := d.FileByFileId(fileId)
