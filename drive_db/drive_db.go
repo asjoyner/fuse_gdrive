@@ -1182,7 +1182,7 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, newchunk, filesize int64) {
 		chunk:    newchunk,
 		filesize: filesize,
 	}
-	log.Printf("queued      %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+	debug.Printf("queued      %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
 }
 
 // singleflight drive fetches.
