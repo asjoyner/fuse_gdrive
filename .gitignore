@@ -28,3 +28,4 @@ _testmain.go
 
 # Go binary
 fuse_gdrive
+start_fuse_gdrive.sh
