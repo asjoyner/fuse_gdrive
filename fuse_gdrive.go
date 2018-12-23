@@ -171,6 +171,9 @@ func main() {
 		fuse.FSName("GoogleDrive"),
 		fuse.Subtype("gdrive"),
 		fuse.VolumeName(account),
+		fuse.MaxReadahead(64 * 1024 * 1024), // in bytes
+		fuse.AsyncRead(),
+		fuse.WritebackCache(),
 	}
 
 	if *allowOther {
