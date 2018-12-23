@@ -4,6 +4,7 @@ package drive_db
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1213,7 +1214,14 @@ func (d *DriveDB) getChunkFromDriveImpl(f *File, chunk, filesize int64) ([]byte,
 	if end > filesize {
 		end = filesize
 	}
+
 	spec := fmt.Sprintf("bytes=%d-%d", start, end)
+	var zb []byte
+	if start == 0 {
+		if zb, err = getZerobyte(f); err == nil {
+			spec = fmt.Sprintf("bytes=1-%d", end)
+		}
+	}
 	req.Header.Add("Range", spec)
 	debug.Printf("reading %v %s", f.Id, spec)
 
@@ -1231,9 +1239,31 @@ func (d *DriveDB) getChunkFromDriveImpl(f *File, chunk, filesize int64) ([]byte,
 	if err != nil {
 		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
 	}
+	if zb != nil {
+		chunkBytes = append(zb, chunkBytes...)
+	}
 
 	log.Printf("retrieved   %s drive block %d of %d", f.Id, chunk, filesize/d.driveSize)
 	return chunkBytes, d.writeChunks(f.Id, chunk, chunkBytes)
+}
+
+func getZerobyte(file *File) ([]byte, error) {
+	var zb []byte
+	var err error
+	var found bool
+	for _, p := range file.Properties {
+		if p.Key == "zb" {
+			found = true
+			zb, err = hex.DecodeString(p.Value)
+			if err != nil {
+				return nil, errors.New("could not decode zerobyte")
+			}
+		}
+	}
+	if !found {
+		return nil, errors.New("properties have no zerobyte")
+	}
+	return zb, nil
 }
 
 // singleflight downloadUrl fetches.
