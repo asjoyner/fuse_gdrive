@@ -272,7 +272,7 @@ func (sc *serveConn) read(req *fuse.ReadRequest) {
 		return
 	}
 	debug.Printf("Read(title: %s, offset: %d, size: %d)\n", f.Title, req.Offset, req.Size)
-	resp.Data, err = sc.db.ReadFiledata(f.Id, req.Offset, int64(req.Size), f.FileSize)
+	resp.Data, err = sc.db.ReadFiledata(f, req.Offset, int64(req.Size), f.FileSize)
 	if err != nil && err != io.EOF {
 		debug.Printf("driveCache.Read (..%v..): %v", req.Offset, err)
 		req.RespondError(fuse.EIO)

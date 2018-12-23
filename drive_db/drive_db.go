@@ -81,7 +81,7 @@ type CheckPoint struct {
 }
 
 type DownloadSpec struct {
-	fileId   string
+	file     *File
 	chunk    int64
 	filesize int64
 }
@@ -914,12 +914,12 @@ func (d *DriveDB) IsOpen(fileId string) bool {
 }
 
 // ReadFiledata reads a chunk of a file, possibly from cache.
-func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]byte, error) {
+func (d *DriveDB) ReadFiledata(f *File, offset, size, filesize int64) ([]byte, error) {
 	var ret []byte
 	// Read all the necessary chunks
 	chunk0, chunkN := d.chunkNumbers(offset, size)
 	for chunk := chunk0; chunk <= chunkN; chunk++ {
-		data, err := d.readChunk(fileId, chunk, filesize)
+		data, err := d.readChunk(f, chunk, filesize)
 		if err != nil {
 			log.Printf(" chunk %v read error: %v", chunk, err)
 			return nil, err
@@ -934,7 +934,7 @@ func (d *DriveDB) ReadFiledata(fileId string, offset, size, filesize int64) ([]b
 		low = 0
 	}
 	if low > dsize {
-		return nil, fmt.Errorf("tried to read past end of chunk (low:%d, dsize:%d): fileId: %s, offset:%d, size:%d, filesize:%d", low, dsize, fileId, offset, size, filesize)
+		return nil, fmt.Errorf("tried to read past end of chunk (low:%d, dsize:%d): fileId: %s, offset:%d, size:%d, filesize:%d", low, dsize, f.Id, offset, size, filesize)
 	}
 	high := low + size
 	if high > dsize {
@@ -963,13 +963,13 @@ func (d *DriveDB) clearDataCache(fileId string) {
 }
 
 // readChunk singleflights the read of a chunk of data from a drive file.
-func (d *DriveDB) readChunk(fileId string, chunk, filesize int64) ([]byte, error) {
+func (d *DriveDB) readChunk(f *File, chunk, filesize int64) ([]byte, error) {
 	if chunk*(*driveCacheChunk) > filesize {
 		return nil, fmt.Errorf("read past eof")
 	}
-	key := cacheMapKey(fileId, chunk)
+	key := cacheMapKey(f.Id, chunk)
 	v, err := d.sf.Do(string(key), func() (interface{}, error) {
-		return d.readChunkImpl(fileId, chunk, filesize)
+		return d.readChunkImpl(f, chunk, filesize)
 	})
 	return v.([]byte), err
 }
@@ -1094,24 +1094,19 @@ func (d *DriveDB) writeChunks(fileId string, drivechunk int64, data []byte) erro
 }
 
 // readChunkImpl actually reads the data from either the db or drive.
-func (d *DriveDB) readChunkImpl(fileId string, chunk, filesize int64) ([]byte, error) {
+func (d *DriveDB) readChunkImpl(f *File, chunk, filesize int64) ([]byte, error) {
 	// map to larger drive read size, store last read drive chunk
-	data, err := d.readCacheBlock(fileId, chunk)
+	data, err := d.readCacheBlock(f.Id, chunk)
 	if err == nil {
 		return data, nil
 	}
 
 	dchunk := d.chunkToDriveChunk(chunk)
-	defer d.prefetchDriveChunk(fileId, dchunk+1, filesize)
-	log.Printf("sync read   %s drive block %d", fileId, dchunk)
-	data, err = d.getChunkFromDrive(fileId, dchunk, filesize)
+	defer d.prefetchDriveChunk(f, dchunk+1, filesize)
+	log.Printf("sync read   %s drive block %d", f.Id, dchunk)
+	data, err = d.getChunkFromDrive(f, dchunk, filesize)
 	if err != nil {
-		file, ferr := d.FileByFileId(fileId)
-		if ferr != nil {
-			log.Printf("error reading from drive: %v / %v", err, ferr)
-		} else {
-			log.Printf("error reading %s from drive: %v", file.Title, err)
-		}
+		log.Printf("error reading %s from drive: %v", f.Title, err)
 		return nil, err
 	}
 
@@ -1132,33 +1127,33 @@ func (d *DriveDB) prefetcher() {
 		case s := <-d.pfetchq:
 			newchunk := s.chunk
 			d.Lock()
-			delete(d.pfetchmap, fmt.Sprintf("%s:%d", s.fileId, newchunk))
+			delete(d.pfetchmap, fmt.Sprintf("%s:%d", s.file.Id, newchunk))
 			d.Unlock()
-			if !d.IsOpen(s.fileId) {
+			if !d.IsOpen(s.file.Id) {
 				continue
 			}
 			// See if the next chunk is already cached.
-			_, err := d.readCacheBlock(s.fileId, d.driveChunkToChunk(newchunk))
+			_, err := d.readCacheBlock(s.file.Id, d.driveChunkToChunk(newchunk))
 			if err == nil {
 				continue
 			}
 			// we don't care about the data; getChunkFromDrive writes it to cache.
-			_, _ = d.getChunkFromDrive(s.fileId, newchunk, s.filesize)
+			_, _ = d.getChunkFromDrive(s.file, newchunk, s.filesize)
 		}
 	}
 }
 
 // readahead the next drive chunk if needed, async
-func (d *DriveDB) prefetchDriveChunk(fileId string, newchunk, filesize int64) {
-	debug.Printf("pfrequest   %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+func (d *DriveDB) prefetchDriveChunk(f *File, newchunk, filesize int64) {
+	debug.Printf("pfrequest   %s drive block %d (q:%d)", f.Id, newchunk, len(d.pfetchq))
 	// Past eof? don't do anything silly.
 	if newchunk*d.driveSize > filesize {
-		debug.Printf("past eof    %s drive block %d", fileId, newchunk)
+		debug.Printf("past eof    %s drive block %d", f.Id, newchunk)
 		return
 	}
-	key := fmt.Sprintf("%s:%d", fileId, newchunk)
+	key := fmt.Sprintf("%s:%d", f.Id, newchunk)
 	// If the file isn't open, drop the prefetch request and delete the map key.
-	if !d.IsOpen(fileId) {
+	if !d.IsOpen(f.Id) {
 		d.Lock()
 		delete(d.pfetchmap, key)
 		d.Unlock()
@@ -1178,28 +1173,28 @@ func (d *DriveDB) prefetchDriveChunk(fileId string, newchunk, filesize int64) {
 	d.Unlock()
 
 	d.pfetchq <- DownloadSpec{
-		fileId:   fileId,
+		file:     f,
 		chunk:    newchunk,
 		filesize: filesize,
 	}
-	debug.Printf("queued      %s drive block %d (q:%d)", fileId, newchunk, len(d.pfetchq))
+	debug.Printf("queued      %s drive block %d (q:%d)", f.Id, newchunk, len(d.pfetchq))
 }
 
 // singleflight drive fetches.
-func (d *DriveDB) getChunkFromDrive(fileId string, chunk, filesize int64) ([]byte, error) {
-	v, err := d.sf.Do(fmt.Sprintf("%s/%v", fileId, chunk), func() (interface{}, error) {
-		return d.getChunkFromDriveImpl(fileId, chunk, filesize)
+func (d *DriveDB) getChunkFromDrive(f *File, chunk, filesize int64) ([]byte, error) {
+	v, err := d.sf.Do(fmt.Sprintf("%s/%v", f.Id, chunk), func() (interface{}, error) {
+		return d.getChunkFromDriveImpl(f, chunk, filesize)
 	})
 	return v.([]byte), err
 }
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
-func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([]byte, error) {
-	debug.Printf("retrieving  %s drive block %d", fileId, chunk)
+func (d *DriveDB) getChunkFromDriveImpl(f *File, chunk, filesize int64) ([]byte, error) {
+	debug.Printf("retrieving  %s drive block %d", f.Id, chunk)
 	if *continuousPrefetch {
-		defer d.prefetchDriveChunk(fileId, chunk+1, filesize)
+		defer d.prefetchDriveChunk(f, chunk+1, filesize)
 	}
-	url, err := d.downloadUrl(fileId, false)
+	url, err := d.downloadUrl(f, false)
 	if err != nil {
 		return nil, fmt.Errorf("downloadUrl(): %v", err)
 	}
@@ -1220,7 +1215,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	}
 	spec := fmt.Sprintf("bytes=%d-%d", start, end)
 	req.Header.Add("Range", spec)
-	debug.Printf("reading %v %s", fileId, spec)
+	debug.Printf("reading %v %s", f.Id, spec)
 
 	resp, err := d.client.Do(req)
 	if err != nil {
@@ -1229,7 +1224,7 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 	defer resp.Body.Close()
 	if resp.StatusCode != 206 && resp.StatusCode != 200 {
 		err := fmt.Errorf("getChunkFromDriveImpl: for %s got HTTP status %v, want 206 or 200: %v", spec, resp.StatusCode, resp.Status)
-		_, _ = d.downloadUrl(fileId, true)
+		_, _ = d.downloadUrl(f, true)
 		return nil, err
 	}
 	chunkBytes, err := ioutil.ReadAll(resp.Body)
@@ -1237,24 +1232,24 @@ func (d *DriveDB) getChunkFromDriveImpl(fileId string, chunk, filesize int64) ([
 		return nil, fmt.Errorf("ioutil.ReadAll: %v", err)
 	}
 
-	log.Printf("retrieved   %s drive block %d of %d", fileId, chunk, filesize/d.driveSize)
-	return chunkBytes, d.writeChunks(fileId, chunk, chunkBytes)
+	log.Printf("retrieved   %s drive block %d of %d", f.Id, chunk, filesize/d.driveSize)
+	return chunkBytes, d.writeChunks(f.Id, chunk, chunkBytes)
 }
 
 // singleflight downloadUrl fetches.
-func (d *DriveDB) downloadUrl(fileId string, force bool) (string, error) {
-	v, err := d.sf.Do(fmt.Sprintf("dlurl:%s", fileId), func() (interface{}, error) {
-		return d.downloadUrlImpl(fileId, force)
+func (d *DriveDB) downloadUrl(f *File, force bool) (string, error) {
+	v, err := d.sf.Do(fmt.Sprintf("dlurl:%s", f.Id), func() (interface{}, error) {
+		return d.downloadUrlImpl(f, force)
 	})
 	return v.(string), err
 }
 
 // The DownloadUrl has a finite lifetime, this ensures we have a fresh cached copy
 // hint: "403 Forbidden" is returned when it has expired
-func (d *DriveDB) downloadUrlImpl(fileId string, force bool) (string, error) {
+func (d *DriveDB) downloadUrlImpl(f *File, force bool) (string, error) {
 	var urldata DownloadURL
 
-	key := downloadUrlKey(fileId)
+	key := downloadUrlKey(f.Id)
 	if !force {
 		err := d.get(key, &urldata)
 		if err == nil {
@@ -1266,7 +1261,7 @@ func (d *DriveDB) downloadUrlImpl(fileId string, force bool) (string, error) {
 		}
 	}
 
-	fresh, err := d.service.Files.Get(fileId).Do()
+	fresh, err := d.service.Files.Get(f.Id).Do()
 	if err != nil {
 		return "", err
 	}
