@@ -136,11 +136,12 @@ func main() {
 	go http.ListenAndServe(fmt.Sprintf("localhost:%s", *port), nil)
 
 	var client *http.Client
-	if *readOnly {
-		client = getClient(ctx, drive.DriveReadonlyScope)
-	} else {
-		client = getClient(ctx, drive.DriveScope)
+	scope := []string{
+		drive.DriveScope,
+		drive.DriveMetadataScope,
+		drive.DriveFileScope,
 	}
+	client = getClient(ctx, scope...)
 
 	// TODO: move into drivedb, so we don't create a service twice
 	service, _ := drive.New(client)

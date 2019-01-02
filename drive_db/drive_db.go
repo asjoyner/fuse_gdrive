@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -108,12 +109,14 @@ type DriveDB struct {
 	sf           singleflight.Group
 	dbpath       string
 	rootId       string
+	shadowId     string
 	driveSize    int64
 	cacheBlocks  int64
 	pfetchq      chan DownloadSpec
 	pfetchmap    map[string]bool
 	openmap      map[string]int
 	openmu       sync.Mutex
+	driveuser    string // id of drive user
 }
 
 func openLevelDB(filepath string) (*leveldb.DB, error) {
@@ -141,11 +144,10 @@ func openLevelDB(filepath string) (*leveldb.DB, error) {
 // NewDriveDB creates a new DriveDB and starts syncing metadata.
 func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time.Duration, rootId string) (*DriveDB, error) {
 	svc, _ := gdrive.New(client)
-	_, err := svc.About.Get().Do()
+	about, err := svc.About.Get().Do()
 	if err != nil {
 		log.Fatalf("drive.service.About.Get().Do: %v\n", err)
 	}
-
 	if *debugDriveDB {
 		debug = true
 	}
@@ -183,6 +185,13 @@ func NewDriveDB(client *http.Client, dbPath, cachePath string, pollInterval time
 		pfetchq:      make(chan DownloadSpec, 200),
 		pfetchmap:    make(map[string]bool),
 		openmap:      make(map[string]int),
+		driveuser:    about.User.EmailAddress,
+	}
+
+	shadowId, err := d.GetShadowId()
+	if err == nil {
+		log.Printf("using shadow: %q", shadowId)
+		d.shadowId = shadowId
 	}
 
 	log.Printf("%d cache blocks of %d bytes each = %d GB", d.cacheBlocks, *driveCacheChunk, d.cacheBlocks*(*driveCacheChunk)/1024/1024/1024)
@@ -1191,7 +1200,7 @@ func (d *DriveDB) getChunkFromDrive(f *File, chunk, filesize int64) ([]byte, err
 
 // getChunkFromDriveImpl gets a drive-chunk (larger than cache-chunk) from Drive.
 func (d *DriveDB) getChunkFromDriveImpl(f *File, chunk, filesize int64) ([]byte, error) {
-	debug.Printf("retrieving  %s drive block %d", f.Id, chunk)
+	debug.Printf("retrieving %s drive block %d", f.Id, chunk)
 	if *continuousPrefetch {
 		defer d.prefetchDriveChunk(f, chunk+1, filesize)
 	}
@@ -1278,8 +1287,13 @@ func (d *DriveDB) downloadUrl(f *File, force bool) (string, error) {
 // hint: "403 Forbidden" is returned when it has expired
 func (d *DriveDB) downloadUrlImpl(f *File, force bool) (string, error) {
 	var urldata DownloadURL
+	fid, err := d.ShadowCopyFile(f.Id)
+	if err != nil {
+		log.Printf("error getting shadow for %q: %v", f.Id, err)
+		fid = f.Id
+	}
 
-	key := downloadUrlKey(f.Id)
+	key := downloadUrlKey(fid)
 	if !force {
 		err := d.get(key, &urldata)
 		if err == nil {
@@ -1291,7 +1305,7 @@ func (d *DriveDB) downloadUrlImpl(f *File, force bool) (string, error) {
 		}
 	}
 
-	fresh, err := d.service.Files.Get(f.Id).Do()
+	fresh, err := d.service.Files.Get(fid).Do()
 	if err != nil {
 		return "", err
 	}
@@ -1308,4 +1322,99 @@ func (d *DriveDB) downloadUrlImpl(f *File, force bool) (string, error) {
 		return urldata.URL, nil
 	}
 	return urldata.URL, nil
+}
+
+// Get the shadow folder, possibly creating it.
+func (d *DriveDB) GetShadowId() (string, error) {
+	shad := strings.ToLower(fmt.Sprintf(".shadow.%s", d.driveuser))
+	kids, err := d.childFileIds(d.rootId)
+	if err != nil {
+		return "", err
+	}
+	for id, isdir := range kids {
+		if !isdir {
+			continue
+		}
+		df, err := d.FileById(id)
+		if err != nil {
+			continue
+		}
+		if df.Title == shad {
+			return id, nil
+		}
+	}
+
+	sf := &gdrive.File{
+		MimeType:       driveFolderMimeType,
+		Title:          shad,
+		Description:    "Copy of media for separate quota accounting",
+		FolderColorRgb: "#f83a22",
+	}
+	result, err := d.service.Files.Insert(sf).Do()
+	if err != nil {
+		return "", fmt.Errorf("error creating shadow dir %q: %v", shad, err)
+	}
+	log.Printf("created shadow folder: %q(%s)", result.Title, result.Id)
+	return result.Id, nil
+}
+
+// Get a shadow fileId
+func (d *DriveDB) GetShadowFileId(origid string) (string, error) {
+	if d.shadowId == "" {
+		return "", fmt.Errorf("no shadow directory")
+	}
+	kids, err := d.childFileIds(d.shadowId)
+	if err != nil {
+		return "", err
+	}
+	for id, isdir := range kids {
+		if isdir {
+			continue
+		}
+		df, err := d.FileById(id)
+		if err != nil {
+			continue
+		}
+		if df.Title == origid {
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not find shadow for file %s", origid)
+}
+
+// ShadowCopyFile makes a copy of the bytes into a new file.
+func (d *DriveDB) ShadowCopyFile(origid string) (string, error) {
+	if d.shadowId == "" {
+		return "", fmt.Errorf("no shadow directory")
+	}
+
+	// Does a shadow copy already exist?
+	id, err := d.GetShadowFileId(origid)
+	if err == nil {
+		return id, nil
+	}
+
+	// Does the original file exist at all?
+	f, err := d.FileById(origid)
+	if err != nil {
+		return "", fmt.Errorf("could not find file %s", origid)
+	}
+
+	// Make the copy.
+	c := &gdrive.File{
+		MimeType:    f.MimeType,
+		Title:       origid,
+		Description: f.Title,
+		Parents:     []*gdrive.ParentReference{{Id: d.shadowId}},
+	}
+	result, err := d.service.Files.Copy(origid, c).Do()
+	if err != nil {
+		return "", fmt.Errorf("error creating shadow copy of %q: %v", origid, err)
+	}
+	_, err = d.UpdateFile(nil, result)
+	if err != nil {
+		log.Printf("error updating file: %v", err)
+	}
+	return result.Id, nil
 }
